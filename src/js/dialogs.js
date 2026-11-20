@@ -197,6 +197,15 @@ function openEditContextMenu() {
     '/|-|' +
     noSel + '转换所有超出八度范围的音符';
   showMenu('editctx', G.mouse.x, G.mouse.y, s);
+  /* 对照 control_draw.gml:700 `menu.menuc = selbx`：
+     「选择左侧/右侧所有」必须以【打开菜单那一刻】鼠标所在的列为分界。
+     之前直接用实时的 S.selbx，菜单一打开、鼠标再移动（哪怕是去点菜单项，
+     指针必然要离开原位置）就会拿到新列，于是分界线跟着鼠标跑 ——
+     表现就是"在音符块左边点选择左侧所有，那个块却被选中"。
+     GML 里 menuc 只在菜单创建时赋值一次，之后保持不变，这里同样存快照。 */
+  const mm = UI.menu && UI.menu.menus && UI.menu.menus[0];
+  if (mm) { mm.menuc = S.selbx; }
+  if (UI.menu) UI.menu.menuc = S.selbx;
 }
 
 /* 菜单动作分发
@@ -205,8 +214,10 @@ function openEditContextMenu() {
           对照 menu_click 里 `ins = sel - 18` 的算法，但不受上级菜单项数变化影响。 */
 /* target：对照 GML 的 obj_menu.menub —— 菜单「在操作哪个对象」的行号/索引。
    由 drawMenu 在 closeMenu() 之前取出并传入（因为 UI.menu 会被清空，
-   而 GML 里 obj_menu 是常驻对象，menub 在菜单关闭后仍然有效）。 */
-function menuAction(menu, label, idx, spos, target) {
+   而 GML 里 obj_menu 是常驻对象，menub 在菜单关闭后仍然有效）。
+   menuc：同上，是「打开菜单时鼠标所在列」的快照（对照 obj_menu.menuc），
+   供「选择左侧/右侧所有」当分界线用。 */
+function menuAction(menu, label, idx, spos, target, menuc) {
   if (menu === 'file') {
     if (label === '新文件') newSong();
     else if (label === '打开歌曲......') loadSongDialog();
@@ -288,12 +299,16 @@ function menuAction(menu, label, idx, spos, target) {
     // 之前这两项都错调成了 selectAll(-1,0)（等于「全选」），
     // 所以「选择右侧所有 / 选择左侧所有」的表现和全选一模一样。
     else if (label === '选择右侧所有 ->') {
+      /* 用 menuc（打开菜单时的列快照），不是实时 S.selbx。
+         实时值会随鼠标移动而变，导致分界线跟指针跑。 */
+      const c = (typeof menuc === 'number' && menuc >= 0) ? menuc : S.selbx;
       selectionPlace(false);
-      selectionAdd(S.selbx + 1, 0, S.enda, S.endb, 0, 0);
+      selectionAdd(c + 1, 0, S.enda, S.endb, 0, 0);
     }
     else if (label === '选择左侧所有 <-') {
+      const c = (typeof menuc === 'number' && menuc >= 0) ? menuc : S.selbx;
       selectionPlace(false);
-      selectionAdd(0, 0, S.selbx, S.endb, 0, 0);
+      selectionAdd(0, 0, c, S.endb, 0, 0);
     }
     else if (label.startsWith('选择所有 ')) selectAll(S.instrument, 0);
     else if (label.startsWith('选择所有除了')) selectAll(S.instrument, 1);

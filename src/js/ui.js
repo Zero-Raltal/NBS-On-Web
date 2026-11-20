@@ -924,11 +924,15 @@ function drawMenu() {
     // menuAction 里读到 undefined 直接 return —— 表现为「点了基准音没反应」。
     const menub = (M.menub !== undefined) ? M.menub : -1;
     const targetIdx = (M.insIdx !== undefined) ? M.insIdx : menub;
+    /* menuc：打开菜单时的列号快照（对照 GML obj_menu.menuc）。
+       「选择左侧/右侧所有」用它做分界，而不是实时 S.selbx ——
+       用户点菜单项时指针一定已经离开了原来那一格。 */
+    const menuc = (M.menuc !== undefined) ? M.menuc : -1;
     closeMenu();
     if (it && !it.inactive && it.sub === 0) {
       // 第 4 个参数是"本级菜单内的项序号"：音色子菜单用它定位乐器，
       // 不再靠中文标签文本反解名字（标签会带图标/快捷键前缀，容易解析错）。
-      menuAction(name, it.label, it.n, it.spos, targetIdx);
+      menuAction(name, it.label, it.n, it.spos, targetIdx, menuc);
     }
   }
   if (G.keysPressed['Escape']) closeMenu();

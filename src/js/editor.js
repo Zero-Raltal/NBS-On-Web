@@ -567,7 +567,15 @@ function playColumnRange(start, end, audioWhen) {
           if (ins && ins.loaded) playSound(ins, gKey(xx, b), c, d, e, audioWhen);
           if (ins && ins.name === 'Tempo Changer') S.tempo = floor(Math.abs(e)) / 15;
           if (ins && ins.press) S.key_played[gKey(xx, b)] = G.time;
-          S.grid.played[gidx(xx, b)] = G.time;
+          /* 闪光时间戳必须记「这个音应该在什么时候响」，而不是「这行代码什么时候执行」。
+             播放器为了后台不掉音会【提前】0.25~1.5 秒排期（见 scheduleAhead），
+             而这里如果写 G.time，音符块就在声音实际发出前 0.25~1.5 秒开始闪光 ——
+             表现为「刻度线离那个格子还有一段距离，方块却先亮了」。
+             audioWhen 是 Web Audio 时间轴上的绝对时刻，换算成 G.time 口径即可：
+               G.time 在调用时刻对应 AU.ctx.currentTime，两者差一个固定偏移。 */
+          S.grid.played[gidx(xx, b)] = (typeof audioWhen === 'number')
+            ? G.time + (audioWhen - AU.ctx.currentTime)
+            : G.time;
         }
       }
     }
@@ -1016,7 +1024,15 @@ function drawEditor(dt) {
       const i = gidx(col, layer);
       let alpha = 0.5 * (gVel(col, layer) / 100) + 0.25;
       if (S.lockedlayer[layer] === 0) {
-        alpha += 0.5 * (1 - Math.min(1, now - S.grid.played[i]));
+        /* 亮度按「该音发声之后过了多久」衰减：刚响时 +0.5，1 秒后回到 0。
+           由于排期是提前做的（scheduleAhead 会提前 0.25~1.5 秒），
+           played[i] 经常是【未来时刻】。此时 now - played[i] < 0，
+           表示"还没轮到它响" —— 一点都不能亮，必须直接跳过。
+           踩过的坑：先前写成 Math.max(0, now-played) 再算 1-min(1,x)，
+           结果未来时 x=0 → 1-0=1 → 给满亮度，刚好把"提前闪光"写到极致。
+           正确写法是先用差值的符号把关，负值直接不加亮度。 */
+        const dtPlayed = now - S.grid.played[i];
+        if (dtPlayed >= 0) alpha += 0.5 * (1 - Math.min(1, dtPlayed));
       }
       let s = 0;
       if (S.playing === 0 && S.selected === 0) {
