@@ -155,6 +155,11 @@ async function boot() {
   if (!(typeof S.window_scale === 'number') || !isFinite(S.window_scale) || S.window_scale <= 0) {
     S.window_scale = 1;
   }
+  /* 触屏初始化要排在 resizeCanvas 之前：
+     touchInit 会判定初始输入模态，而模态决定了缩放下限（TOUCH_MIN_SCALE），
+     resizeCanvas 又要用这个有效缩放来算逻辑尺寸。
+     顺序反了的话第一帧会按鼠标的 1:1 排一次，第二帧才跳到触屏布局。 */
+  if (typeof touchInit === 'function') touchInit();
   resizeCanvas();
   computeLayout();
   initInput();

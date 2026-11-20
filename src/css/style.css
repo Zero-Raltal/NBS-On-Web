@@ -4,9 +4,23 @@ html, body {
   font-family: "Open Sans", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
   -webkit-user-select: none; user-select: none;
   -webkit-font-smoothing: antialiased;
+  /* 触屏：禁止浏览器的双击缩放、下拉刷新、橡皮筋回弹。
+     编辑器是固定画布的自绘应用，任何页面级手势都会和它抢输入
+     （最典型的是"拖网格拖到一半页面开始滚动"）。
+     只在这里关掉，画布上另有 touch-action: none。 */
+  overscroll-behavior: none;
+  touch-action: manipulation;
 }
 #app { position: absolute; inset: 0; }
-#screen { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#screen {
+  position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+  /* 关键：交给 JS 自己处理手势。有这一行浏览器才不会把触摸当成滚动/缩放，
+     pointermove 才能连续不断地到达（否则会被接管成滚动而中途取消）。
+     顺带禁用长按弹出的系统上下文菜单与文本选择。 */
+  touch-action: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
 #hiddeninput {
   position: absolute; left: -1000px; top: 0; width: 1px; height: 1px;
   opacity: 0; border: 0; outline: 0; padding: 0;

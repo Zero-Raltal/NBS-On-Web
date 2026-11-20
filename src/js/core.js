@@ -335,14 +335,28 @@ function initInput() {
 
   const toLogical = (e) => {
     const r = cv.getBoundingClientRect();
-    return [(e.clientX - r.left) / S.window_scale, (e.clientY - r.top) / S.window_scale];
+    /* 触屏模态下有个缩放下限（见 touch.js 的 TOUCH_MIN_SCALE），
+       它可能高于 S.window_scale，所以坐标换算必须走同一个函数，
+       否则点下去的位置和画出来的位置会整体错位。 */
+    const sc = (typeof touchEffScale === 'function') ? touchEffScale() : S.window_scale;
+    return [(e.clientX - r.left) / sc, (e.clientY - r.top) / sc];
   };
+  /* 触摸结束后的短暂窗口里，浏览器会补发一次兼容鼠标事件。
+     不拦掉的话，一次轻点会同时走 pointer 和 mouse 两条路 —— 等于点了两下
+     （最直观的症状是"点一下音符被放了两遍"）。 */
+  const mouseBlocked = () => (typeof touchMouseBlocked === 'function') && touchMouseBlocked();
+
   window.addEventListener('mousemove', (e) => {
+    if (mouseBlocked()) return;
     const [x, y] = toLogical(e);
     G.mouse.x = x; G.mouse.y = y;
     G.ctrl = e.ctrlKey; G.shift = e.shiftKey; G.alt = e.altKey;
   });
   window.addEventListener('mousedown', (e) => {
+    if (mouseBlocked()) return;
+    /* 有真实鼠标在动就切回鼠标模态：混合设备（触屏笔记本、手机接鼠标）
+       不该被永久当成触屏，按"你此刻在用什么"走才对。 */
+    if (typeof touchSetModality === 'function' && TOUCH.mode === 1) touchSetModality(0);
     const [x, y] = toLogical(e);
     G.mouse.x = x; G.mouse.y = y;
     G.ctrl = e.ctrlKey; G.shift = e.shiftKey; G.alt = e.altKey;
@@ -351,6 +365,7 @@ function initInput() {
     e.preventDefault();
   });
   window.addEventListener('mouseup', (e) => {
+    if (mouseBlocked()) return;
     if (e.button < 3) { G.mb[e.button] = false; G.mbr[e.button] = true; }
   });
   window.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -503,13 +518,17 @@ function startLoop(cb) {
 function resizeCanvas() {
   const cv = G.canvas;
   G.dpr = window.devicePixelRatio || 1;
+  /* 有效缩放：触屏模态下不会低于 TOUCH_MIN_SCALE（保证按钮可点面积）。
+     绘制变换和输入换算必须用【同一个】值，否则画到哪儿就点不到哪儿。 */
+  const eff = (typeof touchEffScale === 'function') ? touchEffScale() : S.window_scale;
+  S.eff_scale = eff;
   const cw = cv.clientWidth, ch = cv.clientHeight;
   cv.width = Math.round(cw * G.dpr);
   cv.height = Math.round(ch * G.dpr);
-  G.W = cw / S.window_scale;
-  G.H = ch / S.window_scale;
+  G.W = cw / eff;
+  G.H = ch / eff;
   S.rw = Math.floor(G.W);
   S.rh = Math.floor(G.H);
-  G.ctx.setTransform(G.dpr * S.window_scale, 0, 0, G.dpr * S.window_scale, 0, 0);
+  G.ctx.setTransform(G.dpr * eff, 0, 0, G.dpr * eff, 0, 0);
   G.ctx.imageSmoothingEnabled = false;
 }

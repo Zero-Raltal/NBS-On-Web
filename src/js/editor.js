@@ -50,20 +50,69 @@ function editorInit() {
   S.save_version = 5;
   S.user_instruments = 0;
   S.hires = false;
+  /* 触屏 / 竖屏状态。portrait 由 computeLayout 每帧按实时宽高比重算，
+     这里只是给个初值，避免第一帧读到 undefined。 */
+  S.portrait = 0;
+  S.touch_mode = 0;
+  S.drawer = '';          // 当前展开的抽屉：'' / 'layers' / 'piano' / 'props'
+  S.drawer_scroll = 0;
+  S.piano_oct = 0;        // 抽屉琴键的八度偏移
+  S.drawer_piano_flat = 0; // 抽屉琴键关掉两端淡出（键太少时，见 drawDrawerPiano）
+  S.toolbar_h = 52;       // 顶栏实测高度（竖屏折行后会长出来）
+  S.info_h = 0;           // 竖屏时间/速度条的高度
   reset();
 }
 
 /* ---------------------------------------------------------------- 布局 */
 function computeLayout() {
   const rw = S.rw, rh = S.rh;
-  if (!S.fullscreen && S.show_layers) S.totalcols = floor((rw - 8 - 270) / 32);
-  else if (S.dropmode) S.totalcols = floor(rh / 32) + 1;
-  else S.totalcols = floor(rw / 32) + 1;
-  S.rhval = 270;
-  if (!S.show_piano) S.rhval = 130;
-  if (S.fullscreen) S.rhval = 32;
-  S.totalrows = floor((rh - S.rhval) / 32);
-  if (S.fullscreen) S.totalrows += 1;
+
+  /* 【竖屏判定】按实时宽高比，而不是按设备型号/UA。
+     窗口一改成竖长条就立刻变竖屏布局，转回横屏立刻恢复 —— 用户提到的
+     "直接检测页面长宽比例，实时变化"就是这里。
+     阈值取 1.15 而不是 1.0：方块状窗口（比如 DevTools 并排时）按桌面布局
+     排布更舒服，只有明显竖长才切抽屉模式。
+     全屏模式不受影响（它本来就只留网格）。 */
+  S.portrait = (!S.fullscreen && rh >= rw * 1.15) ? 1 : 0;
+
+  if (S.portrait) {
+    /* 竖屏：宽度是最稀缺的资源。
+       桌面布局里图层面板固定吃掉 270 逻辑像素 —— 手机竖屏总共才 300 左右，
+       那样网格只剩一两列，完全没法编辑。所以竖屏下：
+         · 图层面板和钢琴都改成【浮层抽屉】，不再参与布局计算；
+         · 网格吃满整个宽度；
+         · 底部只给滚动条/抽屉标签/状态栏留 130。
+       抽屉打开时靠 scrim 挡住下层点击（见 editorFrame 的 blocked）。 */
+    if (S.dropmode) S.totalcols = floor(rh / 32) + 1;
+    else S.totalcols = floor(rw / 32) + 1;
+    S.x1 = -2;
+    /* 【竖屏的纵向预算要从 y1 倒推，不能再用固定的 rhval】
+       桌面布局里 rhval（270/130）是"底部留多少"，因为顶栏高度是常量 52。
+       竖屏下顶栏会折行、高度是浮动的一两百，时间/速度条还占一条 34 的带，
+       如果再按 rhval 从 rh 往回留，网格底部就会算到屏幕外，
+       横向滚动条和抽屉标签条会互相压住（实测确实叠在一起）。
+       所以这里改成：
+         y1 = 折行顶栏高度 + 信息条高度
+         totalrows 由 (rh - (y1+34) - 底部固定占用) 反推
+       底部固定占用 = 横向滚动条 16 + 状态栏 24 + 抽屉标签条 30 + 余量。 */
+    S.info_h = 40;
+    S.y1 = (S.toolbar_h || 52) + S.info_h;
+    const bottomFixed = 16 + 24 + 30 + 22;
+    S.totalrows = Math.max(1, floor((rh - (S.y1 + 34) - bottomFixed) / 32));
+  } else {
+    S.info_h = 0;
+    if (!S.fullscreen && S.show_layers) S.totalcols = floor((rw - 8 - 270) / 32);
+    else if (S.dropmode) S.totalcols = floor(rh / 32) + 1;
+    else S.totalcols = floor(rw / 32) + 1;
+    S.rhval = 270;
+    if (!S.show_piano) S.rhval = 130;
+    if (S.fullscreen) S.rhval = 32;
+    S.totalrows = floor((rh - S.rhval) / 32);
+    if (S.fullscreen) S.totalrows += 1;
+    S.x1 = (!S.fullscreen && S.show_layers) ? 264 : -2;
+    S.y1 = S.fullscreen ? -2 : 52;
+  }
+  if (S.totalrows < 1) S.totalrows = 1;
 
   const keysFit = Math.min(S.keysmax, floor((rw - 32) / 39));
   if (keysFit !== S.keysshow) {
@@ -75,8 +124,6 @@ function computeLayout() {
     }
   }
   S.keysshow = keysFit;
-  S.x1 = (!S.fullscreen && S.show_layers) ? 264 : -2;
-  S.y1 = S.fullscreen ? -2 : 52;
   S.gx = S.x1 + 2;
   S.gy = S.y1 + 34;
 }
@@ -147,7 +194,10 @@ function editorFrame(dt) {
   // 菜单 / 消息框打开时，编辑器层不应响应鼠标
   const rawMb = G.mb.slice(), rawMbp = G.mbp.slice(), rawMbr = G.mbr.slice(), rawWheel = G.wheel;
   // 关闭菜单/消息框的那一次按下要被"吞掉"，直到松开（含松开那一帧），避免穿透到下层控件
-  const blocked = isDialogWindow(S.window) || !!UI.menu || !!UI.modal || !!UI.swallowPress;
+  /* 竖屏抽屉打开时同样屏蔽下层：抽屉是浮层，底下的网格仍画在那里，
+     不拦的话点抽屉里的按钮会顺手在网格上落一个音符。 */
+  const blocked = isDialogWindow(S.window) || !!UI.menu || !!UI.modal || !!UI.swallowPress ||
+    (typeof drawerOpen === 'function' && drawerOpen());
   UI.rawMbr = rawMbr; UI.rawMbp = rawMbp; UI.blocked = blocked;
   if (blocked) {
     G.mb = [false, false, false]; G.mbp = [false, false, false];
@@ -1025,10 +1075,10 @@ function drawEditor(dt) {
   }
 
   // 图层面板
-  if (!S.fullscreen && S.show_layers) drawLayersPanel();
+  if (!S.fullscreen && S.show_layers && !S.portrait) drawLayersPanel();
 
   // 宏工具条
-  if (S.selected !== 0 && S.show_piano) drawMacroBar();
+  if (S.selected !== 0 && S.show_piano && !S.portrait) drawMacroBar();
 
   // 顶栏
   drawTopBar();
@@ -1037,7 +1087,9 @@ function drawEditor(dt) {
   // 时间/速度信息
   drawInfoBoxes();
   // 钢琴
-  if (!S.fullscreen && (S.show_piano || S.dropmode)) drawPianoAll();
+  if (!S.fullscreen && (S.show_piano || S.dropmode) && !S.portrait) drawPianoAll();
+  // 竖屏抽屉（图层面板 / 琴键 / 属性，都在这一个浮层里）
+  drawDrawer();
   // 提示消息
   drawMsg();
 
@@ -1330,6 +1382,327 @@ function drawHScrollbar() {
   if (hov && G.mbr[0]) { S.fullscreen = S.fullscreen ? 0 : 1; setMsg(S.fullscreen ? '全屏模式 => 开启' : '全屏模式 => 关闭'); }
 }
 
+/* ---------------------------------------------------------------- 竖屏抽屉
+ *
+ * 竖屏宽度不够并排放图层/钢琴，所以这两块改成「底部标签 + 浮层抽屉」：
+ *   · 平时收起，只在底部留一个 30px 的标签条；
+ *   · 点标签向上抽出对应面板，再点一次（或点抽屉外的暗色遮罩）收起；
+ *   · 同时只有一个抽屉打开，互斥，不会两层叠在一起。
+ *
+ * 为什么用浮层而不是把面板压扁塞进布局：
+ *   图层面板一行要放名字输入框+7 个按钮+两个滑块，宽度天然需要 260 左右，
+ *   压到手机宽度(< 320)会把控件挤成不可用的细条；
+ *   钢琴要按 39px/键 排 3 个八度，同样横向放不下。
+ *   浮层可以画在网格之上、占满整个宽度，既能保住控件尺寸，
+ *   又不必牺牲网格的可用列数 —— 收起后网格依然是满宽的。
+ */
+const DRAWER_H = 30;          // 底部标签条高度
+const DRAWER_PANEL_H = 190;   // 抽出的面板高度
+
+/* 抽屉是否正在打开（供 editorFrame 屏蔽下层点击） */
+function drawerOpen() {
+  return !!(S.portrait && S.drawer);
+}
+
+/* 底部标签条 + 抽屉本体。两个都画在网格之上。 */
+function drawDrawer() {
+  if (!S.portrait || S.fullscreen) return;
+  const rw = S.rw, rh = S.rh;
+
+  // ---- 标签条 ----
+  const ty = rh - DRAWER_H;
+  setColor(C.panel);
+  fillRect(0, ty, rw, DRAWER_H);
+  setColor(C.separator);
+  line(0, ty, rw, ty);
+
+  const tabs = [];
+  if (S.show_layers) tabs.push({ id: 'layers', label: '图层' });
+  if (S.show_piano) tabs.push({ id: 'piano', label: '琴键' });
+  tabs.push({ id: 'props', label: '属性' });
+
+  const tw = Math.min(96, floor((rw - 8) / Math.max(1, tabs.length)));
+  setFont(FONT.main(11));
+  for (let i = 0; i < tabs.length; i++) {
+    const t = tabs[i];
+    const tx = 4 + i * tw;
+    const active = S.drawer === t.id;
+    const hover = mouseRectangle(tx, ty, tw - 2, DRAWER_H) && !isDialogWindow(S.window);
+    if (hover) G.cursor = 'pointer';
+    if (active) {
+      setColor(C.accent);
+      roundRect(tx, ty + 4, tx + tw - 2, ty + DRAWER_H - 4, 4, true);
+    } else if (hover) {
+      setColor(C.controlBgHover);
+      roundRect(tx, ty + 4, tx + tw - 2, ty + DRAWER_H - 4, 4, true);
+    }
+    setColor(active ? C.accentText : C.text);
+    text(tx + (tw - 2) / 2, ty + 9, t.label, 'center');
+    /* 【必须只让命中的那个标签响应，并且要读 rawMbr】
+       两个坑叠在一起：
+       1) 早先写成裸的 `if (G.mbr[0])` —— mbr 是"本帧刚松开"的全屏共享标志，
+          不带位置判断，同一次抬手会把循环里【每一个】标签都执行一遍，
+          最终留下最后一个（属性）。表现就是"点哪个标签都跳到属性抽屉"。
+       2) drawEditor 之后 G.mbr 已被 blocked 逻辑清零（抽屉打开时必然 blocked），
+          所以这里必须读 UI.rawMbr —— 它是清零前的原始输入快照。
+       两个都修好，标签才会"点哪个开哪个"。 */
+    const mbrTap = (UI.rawMbr || G.mbr);
+    if (hover && mbrTap[0]) {
+      if (S.drawer === t.id) S.drawer = '';
+      else { S.drawer = t.id; S.select = 0; }
+      UI.swallowPress = true;
+    }
+  }
+  setFont(FONT.main());
+
+  if (!S.drawer) {
+    /* 抽屉收起时必须清掉 flat 标记，否则横屏主界面的钢琴
+       也会继承"关掉两端淡出"的设定（它不是只属于抽屉的开关）。 */
+    S.drawer_piano_flat = 0;
+    return;
+  }
+
+  // ---- 抽屉本体 ----
+  const ph = Math.min(DRAWER_PANEL_H, floor(rh * 0.55));
+  const py = ty - ph;
+  // 抽屉打开时，把抽屉区域之外的点击当作"点到遮罩"→ 收起
+  const inPanel = mouseRectangle(0, py, rw, ph);
+  if (!inPanel && G.mbp[0] && !isDialogWindow(S.window)) {
+    S.drawer = ''; UI.swallowPress = true;
+    return;
+  }
+  /* 抽屉外压一层半透明暗色。
+     没有遮罩时，抽屉下方露出的网格看起来和平时一模一样，
+     用户会以为还能直接点（实际已经被拦截），体感是"点了没反应"。
+     压暗之后"这一层是浮层"一眼可见。 */
+  setColor(S.dark ? '#000000' : '#404040');
+  setAlpha(0.28);
+  fillRect(0, S.y1 - 4, rw, py - (S.y1 - 4));
+  setAlpha(1);
+  setColor(C.panel);
+  fillRect(0, py, rw, ph);
+  setColor(C.separator);
+  line(0, py, rw, py);
+  // 顶部把手，暗示"这是可收起的抽屉"
+  setColor(C.textDim);
+  roundRect(rw / 2 - 18, py + 3, rw / 2 + 18, py + 6, 2, true);
+
+  if (S.drawer === 'layers') drawDrawerLayers(py, ph);
+  else if (S.drawer === 'piano') drawDrawerPiano(py, ph);
+  else drawDrawerProps(py, ph);
+}
+
+/* 图层抽屉：把一行的控件按「窄屏友好」的顺序横排，做得比桌面版更宽松。
+   名字输入框保留可编辑；锁定/独奏/增删/上下移沿用 LAYER_ICONS 的命中逻辑。 */
+function drawDrawerLayers(py, ph) {
+  const rw = S.rw;
+  /* 【一层要放「名字 + 7 个按钮」，怎么排】
+     先试一行排完：把按钮缩到 26 逻辑像素（× 1.3 手势缩放 ≈ 34 CSS 像素，
+     对"锁定/独奏/上下移"这类开关够用），一层只占 36 高 ——
+     同样的抽屉高度能多看一倍以上的层数，而层数多正是需要这个面板的场景。
+     只有当一行挤不下名字框（< 56）时，才退回两行 + 30 按钮。
+     实测 300 宽：一行需要 6+18+4+7*28+6+8 = 238 → 名字还能拿 62，走一行分支。 */
+  const padL = 6, padR = 6, numW = 18, gap = 2;
+  const oneRowNeed = padL + numW + 4 + 7 * (26 + gap) + padR + 8;
+  const oneRow = (rw - oneRowNeed) >= 56;
+
+  const btnSize = oneRow ? 26 : 30;
+  const btnGap = gap;
+  const btnW = btnSize + btnGap;
+  const totalBtnW = 7 * btnW;
+  /* 两行模式下的每行按钮数。宽 300、名字留 56 时可用宽度约 202 → 202/32 = 6 个；
+     取 5 能给名字多留一点活动空间，第二行只剩 2 个，排布更紧凑。 */
+  const perRow = oneRow ? 7 : 5;
+  /* 行高必须真的装得下按钮：上下内边距 4 + 每行 btnSize + 行间距。
+     早先写成固定 48，而两行按钮实际需要 4+30+2+30+4 = 70，
+     于是下一层的名字会压到上一层第二行按钮上（截图里"删 上 下"和下一层名字重叠）。 */
+  const rowH = oneRow ? 36 : (4 + btnSize + btnGap + btnSize + 4);
+  const nameW = oneRow
+    ? clamp(rw - (padL + numW + 4 + totalBtnW + padR + 8), 56, 150)
+    : clamp(rw - (padL + numW + 4 + perRow * btnW + padR + 8), 56, 150);
+
+  const maxRows = Math.max(1, floor((ph - 10) / rowH));
+  const total = Math.max(1, S.endb2);
+  if (S.drawer_scroll > total - maxRows) S.drawer_scroll = Math.max(0, total - maxRows);
+  if (S.drawer_scroll < 0) S.drawer_scroll = 0;
+
+  for (let i = 0; i < maxRows; i++) {
+    const layer = floor(S.drawer_scroll) + i;
+    if (layer >= total) break;
+    const y = py + 6 + i * rowH;
+    const hover = mouseRectangle(2, y, rw - 4, rowH - 2) && !isDialogWindow(S.window);
+    if (hover) { setColor(C.controlBgHover); roundRect(2, y, rw - 2, y + rowH - 4, 4, true); }
+
+    setFont(FONT.small());
+    setColor(C.textDim);
+    text(padL, y + 8, String(layer + 1));
+    setFont(FONT.main());
+
+    const nx = padL + numW;
+    const nameVal = textEdit(400 + layer, S.layername[layer], nx, y + 5, nameW, 18);
+    S.layername[layer] = nameVal;
+
+    // 图标按钮：锁 / 独奏 / 选中 / 添加 / 删除 / 上移 / 下移
+    let bx = nx + nameW + 4;
+    let by = y + 4;
+    let inRow = 0;
+    const act = (tip, fn) => {
+      // 这一行放不下就换到下一行
+      if (inRow >= perRow) { bx = nx + nameW + 4; by = y + 4 + btnSize + btnGap; inRow = 0; }
+      if (bx + btnSize > rw - padR) return;   // 还是放不下就干脆不画，避免画到屏幕外
+      const h = mouseRectangle(bx, by, btnSize, btnSize) && !isDialogWindow(S.window);
+      if (h) { G.cursor = 'pointer'; popupSet(bx, by, btnSize, btnSize, tip); }
+      /* 按钮底色不能用 C.panel —— 抽屉本体就是 C.panel，画上去完全看不见，
+         看起来像一排浮在空中的字。用一个和面板有对比的浅色块。 */
+      setColor(h ? C.controlBgHover : (C.dark ? '#3d3d3d' : '#e6e6e6'));
+      roundRect(bx, by, bx + btnSize, by + btnSize, 4, true);
+      setFont(FONT.small(10));
+      setColor(C.text);
+      text(bx + btnSize / 2, by + btnSize / 2 - 6, tip.slice(0, 1), 'center');
+      setFont(FONT.main());
+      if (h && (UI.rawMbr || G.mbr)[0]) { S.playing = 0; fn(); UI.swallowPress = true; }
+      bx += btnW; inRow++;
+    };
+    act(S.layerlock[layer] === 1 ? '解锁' : '锁定', () => { S.layerlock[layer] = S.layerlock[layer] === 1 ? 0 : 1; S.changed = 1; });
+    act('独奏', () => {
+      const tok = '|' + layer + '|';
+      S.solostr = (S.solostr.indexOf(tok) >= 0) ? S.solostr.replace(tok, '') : (S.solostr + tok);
+      S.changed = 1;
+    });
+    act('选中', () => {
+      const k = S.selected_layers.indexOf(layer);
+      if (k >= 0) S.selected_layers.splice(k, 1); else S.selected_layers.push(layer);
+      S.changed = 1;
+    });
+    act('添加', () => { addLayer(layer + 1, false); S.changed = 1; });
+    act('删除', () => { if (S.endb2 > 1) { removeLayer(layer, false); S.changed = 1; } });
+    act('上移', () => { if (layer > 0) shiftLayers(layer, layer - 1, false); });
+    act('下移', () => { if (layer < S.endb2 - 1) shiftLayers(layer, layer + 1, false); });
+  }
+
+  // 滚动提示
+  if (total > maxRows) {
+    setFont(FONT.small(10));
+    setColor(C.textDim);
+    text(rw - 6, py + ph - 14, '上下滑动查看更多图层', 'right');
+    setFont(FONT.main());
+  }
+}
+
+/* 琴键抽屉：占满抽屉宽度，并给出八度平移按钮。
+ *
+ * 【为什么不把琴键压窄以塞进更多键】
+ *   drawPiano 内部约有 14 处硬编码的 39（键宽）与由它派生的黑键偏移
+ *   （-12 / +27 / +18 / -19）。这些偏移和 spr 精灵的原生尺寸是绑死的，
+ *   一旦把键宽改成参数，黑键位置、音符小图位置都得跟着重算，
+ *   稍错一处就是"点黑键弹出白键的音"。收益却很小：
+ *   触屏模态有 1.3 倍缩放下限，39 逻辑像素本来就等于约 50 CSS 像素，
+ *   已经是舒服的触控目标；压到 30 反而不好点。
+ *   所以这里保持键宽不变，只改【可见音域】——用八度平移去够到更高/更低的音。 */
+function drawDrawerPiano(py, ph) {
+  const rw = S.rw;
+  /* kc 必须和 computeLayout 算出的 keysshow 用【同一个公式】。
+     之前这里写成 floor((rw-8)/39)，而 layout 用的是 floor((rw-32)/39)，
+     两者差一格 —— 抽屉里比全局多画一个键，跨过了 drawPiano 的右端淡出阈值
+     （a > k - min(5, 54-(startkey+k))），
+     导致除最左一个琴键外全部被羽化遮罩盖住，看起来像"琴键被切掉一半"。
+     直接复用 S.keysshow 就不存在两套公式打架的问题。 */
+  const kc = Math.max(1, Math.min(S.keysmax, Math.max(1, S.keysshow)));
+
+  /* 【竖屏琴键太少时的补偿】
+     rw=300 时 layout 只会给 6 个键（floor((300-32)/39)）。
+     draw_piano 的右端淡出条件是 a > k - min(5, 54-(startkey+k))：
+     k=6 时阈值变成 a > 1，等于除最左一个键之外全部被羽化 —— 根本没法弹。
+     这个公式在原版是给"宽屏、键很多、两端自然渐隐"设计的，
+     键数少到这个程度就失效了。
+     所以这里在抽屉里【临时放宽淡出】：把两端 alpha 掩码关掉
+     （把 S.drawer_piano_flat 置 1，drawPiano 里据此跳过 mask）。
+     只是显示层的处理，不影响任何输入/发声逻辑。 */
+  S.drawer_piano_flat = (kc < 12) ? 1 : 0;
+  const px = floor(rw / 2 - (kc * 39) / 2);
+  const yy = py + 14;
+
+  // 八度平移。computeLayout 每帧会重算 S.startkey，所以这里做的是
+  // 「画之前临时叠加一个偏移，画完还原」，不污染布局状态。
+  const maxShift = Math.max(0, 87 - (S.startkey + kc));
+  S.piano_oct = clamp(S.piano_oct || 0, -3, 3);
+  let shift = (S.piano_oct * 12);
+  // 平移后不能越出 0..87 的键域
+  const lo = -S.startkey, hi = 87 - (S.startkey + kc - 1);
+  shift = clamp(shift, lo, hi);
+
+  const savedStart = S.startkey, savedSharp = S.sharpkeys;
+  if (shift !== 0) {
+    S.startkey = savedStart + shift;
+    S.sharpkeys = 0;
+    for (let a = 0; a < S.startkey; a++) {
+      const b = a % 7;
+      if (b !== 1 && b !== 4) S.sharpkeys++;
+    }
+  }
+  drawPiano(px, yy, kc, S.totalcols);
+  S.startkey = savedStart; S.sharpkeys = savedSharp;
+
+  // 八度按钮
+  const bw = 26;
+  setFont(FONT.main(11));
+  const octBtn = (label, x, y, fn, enabled) => {
+    const h = enabled && mouseRectangle(x, y, bw, 22) && !isDialogWindow(S.window);
+    if (h) G.cursor = 'pointer';
+    setColor(!enabled ? C.panel : (h ? C.controlBgHover : (C.dark ? '#3a3a3a' : '#dcdcdc')));
+    roundRect(x, y, x + bw, y + 22, 4, true);
+    setColor(enabled ? C.text : C.textDim);
+    text(x + bw / 2, y + 5, label, 'center');
+    if (h && (UI.rawMbr || G.mbr)[0]) { fn(); UI.swallowPress = true; }
+  };
+  const by = yy + 126;
+  octBtn('◀', 6, by, () => { S.piano_oct = Math.max(-3, (S.piano_oct || 0) - 1); }, shift > lo);
+  octBtn('▶', rw - 6 - bw, by, () => { S.piano_oct = Math.min(3, (S.piano_oct || 0) + 1); }, shift < hi);
+  setFont(FONT.main());
+}
+
+/* 属性抽屉：竖屏下把常用编辑参数集中起来，省得为了改一个数值去开对话框 */
+function drawDrawerProps(py, ph) {
+  const rw = S.rw;
+  setFont(FONT.main(11));
+  let y = py + 10;
+  const line2 = (label, val, tip) => {
+    setColor(C.textDim);
+    text(10, y, label);
+    setColor(C.text);
+    text(rw - 10, y, val, 'right');
+    if (tip) popupSet(6, y - 4, rw - 12, 18, tip);
+    y += 22;
+  };
+  const ins = INSTRUMENTS[S.instrument];
+  line2('当前音色', ins ? ins.name : '-');
+  line2('当前音', getKeyname(S.selected_key, 1));
+  line2('音量 / 声道 / 音高', S.selected_vel + ' / ' + (S.selected_pan - 100) + ' / ' + S.selected_pit);
+  line2('位置 / 层', (S.selbx < 0 ? '无' : S.selbx) + ' / ' + (S.selby < 0 ? '无' : (S.selby + 1)));
+  line2('已选择', S.selected + ' / ' + (S.totalblocks + S.selected));
+  line2('速度', String(S.tempo));
+  line2('循环', S.loop_session ? '开' : '关');
+
+  // 便捷按钮：全屏编辑 / 折叠面板
+  let bx = 10;
+  const by = py + ph - 34;
+  const btn = (label, fn) => {
+    setFont(FONT.main(11));
+    const w = textWidth(label) + 22;
+    if (bx + w > rw - 10) return;
+    const h = mouseRectangle(bx, by, w, 24) && !isDialogWindow(S.window);
+    if (h) G.cursor = 'pointer';
+    setColor(h ? C.controlBgHover : (C.dark ? '#3a3a3a' : '#dcdcdc'));
+    roundRect(bx, by, bx + w, by + 24, 4, true);
+    setColor(C.text);
+    text(bx + w / 2, by + 5, label, 'center');
+    if (h && (UI.rawMbr || G.mbr)[0]) { S.playing = 0; fn(); UI.swallowPress = true; }
+    bx += w + 8;
+  };
+  btn('编辑区域', () => { S.fullscreen = S.fullscreen ? 0 : 1; S.drawer = ''; });
+  btn('收起来', () => { S.drawer = ''; });
+}
+
 function drawVScrollbar() {
   // 对照 control_draw:1247
   const exist = S.hover.exist;
@@ -1568,6 +1941,31 @@ function drawTopBar() {
   const rw = S.rw;
   const c = G.ctx;
 
+  /* 【竖屏折行】
+     顶栏原本是一条固定单行：标签页 + 约 30 个 25px 图标 + 音色盒 + 音量条。
+     整行宽度需求接近 900 逻辑像素，手机竖屏只有 300 左右，单行必然溢出到屏幕外，
+     右侧那批按钮（撤销、音色设置、MIDI……）直接变成点不到。
+     这里改成自动折行：把"下一个图标放不下就换行"做成一个游标，
+     行高固定 25，整条顶栏的高度 = 已用行数 × 25 + 间距。
+     横屏时布局和原来逐像素一致（一行放得下就永远不换行）。
+
+     注意：竖屏下折行后的顶栏会挡住网格，所以 computeLayout 用
+     S.toolbar_h 把 y1 往下推。写入时机是「画完这一帧」，
+     因此下一帧生效 —— resize 后最多滞后一帧就收敛。 */
+  const wrapMode = !!S.portrait;
+  const marginR = 6;
+  let rowX = 6, rowY = 23, rowMaxY = 23;
+  const advance = (n) => {
+    rowX += n;
+    if (wrapMode && rowX > rw - marginR - 25) {
+      rowX = 6;
+      rowY += 25;
+      rowMaxY = Math.max(rowMaxY, rowY);
+    }
+  };
+  // 让一行放不下时就在此之前换行
+  const fits = (need) => !wrapMode || (rowX + need <= rw - marginR);
+
   // 标签页
   let tabx = 1;
   const tabX = {};
@@ -1597,96 +1995,114 @@ function drawTopBar() {
 
   // 工具条
   setFont(FONT.main());
-  let xx = 6, yy = 23;
-  if (drawIcon(ICON.NEW, xx, yy, '新文件')) newSong(); xx += 25;
-  if (drawIcon(ICON.OPEN, xx, yy, '打开歌曲')) loadSongDialog(); xx += 25;
-  if (drawIcon(ICON.SAVE, xx, yy, '保存歌曲')) saveSongFile(false); xx += 25 + 4;
-  drawSeparator(xx, yy + 3); xx += 4;
-  if (drawIcon(S.playing ? ICON.PAUSE : ICON.PLAY, xx, yy, '播放 / 暂停')) togglePlaying(S.totalcols); xx += 25;
-  if (drawIcon(ICON.STOP, xx, yy, '停止歌曲')) { S.playing = 0; S.marker_pos = 0; S.marker_prevpos = 0; S.timestoloop = S.loopmax; stopScheduledAudio(); } xx += 25;
+  const IW = 25;   // 单个图标宽
+  const step = (n) => advance(n);
+  /* 图标游标：先看放不放得下，放不下就先换行再画。
+     这样每个图标都画在它自己的 rowX 上，不会跨行重叠。 */
+  const atIcon = () => {
+    if (wrapMode && rowX + IW > rw - marginR) { rowX = 6; rowY += 25; rowMaxY = Math.max(rowMaxY, rowY); }
+    return rowX;
+  };
+  let xx = atIcon();
+  if (drawIcon(ICON.NEW, xx, rowY, '新文件')) newSong(); step(IW); xx = atIcon();
+  if (drawIcon(ICON.OPEN, xx, rowY, '打开歌曲')) loadSongDialog(); step(IW); xx = atIcon();
+  if (drawIcon(ICON.SAVE, xx, rowY, '保存歌曲')) saveSongFile(false); step(IW + 4); xx = atIcon();
+  drawSeparator(xx, rowY + 3); step(4); xx = atIcon();
+  if (drawIcon(S.playing ? ICON.PAUSE : ICON.PLAY, xx, rowY, '播放 / 暂停')) togglePlaying(S.totalcols); step(IW); xx = atIcon();
+  if (drawIcon(ICON.STOP, xx, rowY, '停止歌曲')) { S.playing = 0; S.marker_pos = 0; S.marker_prevpos = 0; S.timestoloop = S.loopmax; stopScheduledAudio(); } step(IW); xx = atIcon();
   // 对照 draw_icon：这两个按钮按住期间持续生效（不再每帧清零，清零在 handleGlobalKeys 里做）
-  if (!UI.blocked && G.mb[0] && mouseRectangle(xx, yy, 25, 25)) S.forward = -1;
-  if (drawIcon(ICON.BACK, xx, yy, '快退')) S.forward = -1; xx += 25;
-  if (!UI.blocked && G.mb[0] && mouseRectangle(xx, yy, 25, 25)) S.forward = 1;
-  if (drawIcon(ICON.FORWARD, xx, yy, '快进')) S.forward = 1; xx += 25;
-  if (drawIcon(ICON.RECORD, xx, yy, '录制按键', false, S.playing > 0 && S.record)) { S.playing = 0.25; S.record = S.record ? 0 : 1; } xx += 25;
-  if (drawIcon(S.loop_session ? ICON.LOOP : ICON.LOOP_INACTIVE, xx, yy, '开关循环')) { S.loop_session = S.loop_session ? 0 : 1; } xx += 25;
+  if (!UI.blocked && G.mb[0] && mouseRectangle(xx, rowY, IW, IW)) S.forward = -1;
+  if (drawIcon(ICON.BACK, xx, rowY, '快退')) S.forward = -1; step(IW); xx = atIcon();
+  if (!UI.blocked && G.mb[0] && mouseRectangle(xx, rowY, IW, IW)) S.forward = 1;
+  if (drawIcon(ICON.FORWARD, xx, rowY, '快进')) S.forward = 1; step(IW); xx = atIcon();
+  if (drawIcon(ICON.RECORD, xx, rowY, '录制按键', false, S.playing > 0 && S.record)) { S.playing = 0.25; S.record = S.record ? 0 : 1; } step(IW); xx = atIcon();
+  if (drawIcon(S.loop_session ? ICON.LOOP : ICON.LOOP_INACTIVE, xx, rowY, '开关循环')) { S.loop_session = S.loop_session ? 0 : 1; } step(IW); xx = atIcon();
   let metIcon = ICON.METRONOME_INACTIVE;
   if (S.metronome) metIcon = (S.metronome_played === -1 || (S.metronome_played - 1) % 8 === 0) ? ICON.METRONOME_1 : ICON.METRONOME_2;
-  if (drawIcon(metIcon, xx, yy, '开关节拍器')) S.metronome = S.metronome ? 0 : 1;
-  xx += 25 + 4;
+  if (drawIcon(metIcon, xx, rowY, '开关节拍器')) S.metronome = S.metronome ? 0 : 1;
+  step(IW + 4); xx = atIcon();
   if (S.playing === 0) S.record = 0;
-  drawSeparator(xx, yy + 3); xx += 4;
-  if (drawIcon(ICON.EDITMODE_KEY, xx, yy, '音调模式', false, S.editmode === 0)) S.editmode = 0; xx += 25;
-  if (drawIcon(ICON.EDITMODE_VEL, xx, yy, '音量模式', false, S.editmode === 1)) S.editmode = 1; xx += 25;
-  if (drawIcon(ICON.EDITMODE_PAN, xx, yy, '声道模式', false, S.editmode === 2)) S.editmode = 2; xx += 25;
-  if (drawIcon(ICON.EDITMODE_PIT, xx, yy, '音高模式', false, S.editmode === 3)) S.editmode = 3; xx += 25 + 4;
-  drawSeparator(xx, yy + 3); xx += 4;
+  drawSeparator(xx, rowY + 3); step(4); xx = atIcon();
+  if (drawIcon(ICON.EDITMODE_KEY, xx, rowY, '音调模式', false, S.editmode === 0)) S.editmode = 0; step(IW); xx = atIcon();
+  if (drawIcon(ICON.EDITMODE_VEL, xx, rowY, '音量模式', false, S.editmode === 1)) S.editmode = 1; step(IW); xx = atIcon();
+  if (drawIcon(ICON.EDITMODE_PAN, xx, rowY, '声道模式', false, S.editmode === 2)) S.editmode = 2; step(IW); xx = atIcon();
+  if (drawIcon(ICON.EDITMODE_PIT, xx, rowY, '音高模式', false, S.editmode === 3)) S.editmode = 3; step(IW + 4); xx = atIcon();
+  drawSeparator(xx, rowY + 3); step(4); xx = atIcon();
 
   // 音色盒
   const insCount = INSTRUMENTS.length;
-  const insIcons = median(5, Math.ceil((rw - 920) / 25), insCount);
+  /* 竖屏下不能按「剩余宽度」算图标数（会算出 5 个下限，仍然溢出）。
+     直接按一行能放几个算，让音色盒也参与折行。 */
+  const insAvail = wrapMode ? Math.max(3, floor((rw - 12) / 25)) : Math.max(5, Math.ceil((rw - 920) / 25));
+  const insIcons = median(5, Math.min(insAvail, insCount), insCount);
   if (S.showinsbox) {
+    if (wrapMode && rowX + insIcons * 25 + 25 > rw - marginR) { rowX = 6; rowY += 25; rowMaxY = Math.max(rowMaxY, rowY); }
+    xx = rowX;
     const rows = Math.ceil(insCount / insIcons);
-    drawWindow(xx - 2, yy - 2, xx + insIcons * 25 + 2, yy + rows * 25 + 2);
+    drawWindow(xx - 2, rowY - 2, xx + insIcons * 25 + 2, rowY + rows * 25 + 2);
     for (let a = 0; a < rows; a++) {
       for (let b = 0; b < insIcons; b++) {
         const idx = a * insIcons + b;
         if (idx >= insCount) break;
-        if (insIcon(idx, xx + b * 25, yy + a * 25, S.instrument === idx)) {
+        if (insIcon(idx, xx + b * 25, rowY + a * 25, S.instrument === idx)) {
           if (INSTRUMENTS[idx]) { playSound(INSTRUMENTS[idx], S.selected_key, 100, 100, 0); S.instrument = idx; S.selected_vel = 100; S.selected_pan = 100; S.selected_pit = 0; }
         }
       }
     }
-    if (G.mbr[0] && !mouseRectangle(xx, yy, insIcons * 25, rows * 25)) { S.showinsbox = 0; }
-    xx += insIcons * 25;
-    insIcon(ICON.INSBOX_COLLAPSE, xx, yy, false, true);
-    xx += 25;
+    if (G.mbr[0] && !mouseRectangle(xx, rowY, insIcons * 25, rows * 25)) { S.showinsbox = 0; }
+    step(insIcons * 25); xx = atIcon();
+    insIcon(ICON.INSBOX_COLLAPSE, xx, rowY, false, true);
+    step(IW); xx = atIcon();
+    rowMaxY = Math.max(rowMaxY, rowY + rows * 25 - 25);
   } else {
     if (S.instrument < S.insbox_start) S.insbox_start = floor(Math.max(0, S.insbox_start - insIcons) / insIcons) * insIcons;
     else if (S.instrument > S.insbox_start + insIcons - 1) S.insbox_start = floor((S.insbox_start + insIcons) / insIcons) * insIcons;
     S.insbox_start = median(0, S.insbox_start, insCount - insIcons);
     for (let a = S.insbox_start; a < S.insbox_start + insIcons; a++) {
-      if (INSTRUMENTS[a] && insIcon(a, xx, yy, S.instrument === a)) {
+      xx = atIcon();
+      if (INSTRUMENTS[a] && insIcon(a, xx, rowY, S.instrument === a)) {
         playSound(INSTRUMENTS[a], S.selected_key, 100, 100, 0);
         S.instrument = a; S.selected_vel = 100; S.selected_pan = 100; S.selected_pit = 0;
       }
-      xx += 25;
+      step(IW);
     }
     if (insIcons < insCount) {
-      if (insIcon(ICON.INSBOX_EXPAND, xx, yy, false, true)) S.showinsbox = 1;
-      xx += 25;
+      xx = atIcon();
+      if (insIcon(ICON.INSBOX_EXPAND, xx, rowY, false, true)) S.showinsbox = 1;
+      step(IW);
     }
   }
 
   // 撤销/重做/复制... 工具组
-  xx += 4; drawSeparator(xx, yy + 3); xx += 4;
-  if (drawIcon(canUndo() ? ICON.UNDO : ICON.UNDO_INACTIVE, xx, yy, '撤销', !canUndo())) actionUndo(); xx += 25;
-  if (drawIcon(canRedo() ? ICON.REDO : ICON.REDO_INACTIVE, xx, yy, '重做', !canRedo())) actionRedo(); xx += 25;
-  if (drawIcon(S.selected ? ICON.COPY : ICON.COPY_INACTIVE, xx, yy, '复制', !S.selected)) actionCopy(); xx += 25;
-  if (drawIcon(S.selected ? ICON.CUT : ICON.CUT_INACTIVE, xx, yy, '剪切', !S.selected)) actionCut(); xx += 25;
-  if (drawIcon(S.clipboard ? ICON.PASTE : ICON.PASTE_INACTIVE, xx, yy, '粘贴', !S.clipboard)) actionPaste(S.starta, S.startb); xx += 25;
-  if (drawIcon(S.selected ? ICON.DELETE : ICON.DELETE_INACTIVE, xx, yy, '删除', !S.selected)) actionDelete(); xx += 25;
-  xx += 4; drawSeparator(xx, yy + 3); xx += 4;
-  if (drawIcon(ICON.INFORMATION, xx, yy, '歌曲信息')) { S.playing = 0; S.window = W_SONGINFOEDIT; } xx += 25;
-  if (drawIcon(ICON.PROPERTIES, xx, yy, '歌曲属性')) { S.playing = 0; S.window = W_PROPERTIES; } xx += 25;
-  if (drawIcon(ICON.INSTRUMENTS, xx, yy, '音色设置')) { S.playing = 0; S.window = W_INSTRUMENTS; } xx += 25;
-  if (drawIcon(ICON.MIDI_INPUT, xx, yy, 'MIDI 设备管理器')) { S.playing = 0; S.window = W_MIDIDEVICES; } xx += 25;
+  xx = atIcon(); step(4); drawSeparator(xx, rowY + 3); step(4); xx = atIcon();
+  if (drawIcon(canUndo() ? ICON.UNDO : ICON.UNDO_INACTIVE, xx, rowY, '撤销', !canUndo())) actionUndo(); step(IW); xx = atIcon();
+  if (drawIcon(canRedo() ? ICON.REDO : ICON.REDO_INACTIVE, xx, rowY, '重做', !canRedo())) actionRedo(); step(IW); xx = atIcon();
+  if (drawIcon(S.selected ? ICON.COPY : ICON.COPY_INACTIVE, xx, rowY, '复制', !S.selected)) actionCopy(); step(IW); xx = atIcon();
+  if (drawIcon(S.selected ? ICON.CUT : ICON.CUT_INACTIVE, xx, rowY, '剪切', !S.selected)) actionCut(); step(IW); xx = atIcon();
+  if (drawIcon(S.clipboard ? ICON.PASTE : ICON.PASTE_INACTIVE, xx, rowY, '粘贴', !S.clipboard)) actionPaste(S.starta, S.startb); step(IW); xx = atIcon();
+  if (drawIcon(S.selected ? ICON.DELETE : ICON.DELETE_INACTIVE, xx, rowY, '删除', !S.selected)) actionDelete(); step(IW); xx = atIcon();
+  step(4); xx = atIcon(); drawSeparator(xx, rowY + 3); step(4); xx = atIcon();
+  if (drawIcon(ICON.INFORMATION, xx, rowY, '歌曲信息')) { S.playing = 0; S.window = W_SONGINFOEDIT; } step(IW); xx = atIcon();
+  if (drawIcon(ICON.PROPERTIES, xx, rowY, '歌曲属性')) { S.playing = 0; S.window = W_PROPERTIES; } step(IW); xx = atIcon();
+  if (drawIcon(ICON.INSTRUMENTS, xx, rowY, '音色设置')) { S.playing = 0; S.window = W_INSTRUMENTS; } step(IW); xx = atIcon();
+  if (drawIcon(ICON.MIDI_INPUT, xx, rowY, 'MIDI 设备管理器')) { S.playing = 0; S.window = W_MIDIDEVICES; } step(IW); xx = atIcon();
   // 用户要求：去掉工具栏上的「教程视频」「访问官方网站」两个按钮（外链在网页版里没用）。
   // 原版 control_draw.gml:1926/1929 有这两个 draw_icon，此处按需求删除。
 
   // 主音量
+  const volW = wrapMode ? Math.max(60, Math.min(100, rw - marginR - 20)) : 100;
+  xx = atIcon();
+  if (wrapMode && xx + 11 + volW + 11 > rw - marginR) { rowX = 6; rowY += 25; rowMaxY = Math.max(rowMaxY, rowY); xx = rowX; }
   xx += 8;
-  const volW = 100;
   setColor(C.dark ? '#3a3a3a' : '#dcdcdc');
-  roundRect(xx, yy + 10, xx + volW, yy + 13, 2, true);
+  roundRect(xx, rowY + 10, xx + volW, rowY + 13, 2, true);
   setColor(C.accent);
-  roundRect(xx, yy + 10, xx + volW * S.mastervol, yy + 13, 2, true);
+  roundRect(xx, rowY + 10, xx + volW * S.mastervol, rowY + 13, 2, true);
   setColor(C.accent);
-  c.beginPath(); c.arc(xx + volW * S.mastervol, yy + 11.5, 5, 0, Math.PI * 2); c.fill();
-  if (mouseRectangle(xx - 11, yy, 122, 22) && !isDialogWindow(S.window)) {
+  c.beginPath(); c.arc(xx + volW * S.mastervol, rowY + 11.5, 5, 0, Math.PI * 2); c.fill();
+  if (mouseRectangle(xx - 11, rowY, volW + 22, 22) && !isDialogWindow(S.window)) {
     G.cursor = 'pointer';
-    popupSet(xx - 11, yy, 122, 22, '主音量：' + Math.round(S.mastervol * 100));
+    popupSet(xx - 11, rowY, volW + 22, 22, '主音量：' + Math.round(S.mastervol * 100));
     if (G.mb[0]) S.mastervol = clamp((G.mouse.x - xx) / volW, 0, 1);
     if (G.wheel > 0) S.mastervol = Math.min(1, S.mastervol + 0.02);
     if (G.wheel < 0) S.mastervol = Math.max(0, S.mastervol - 0.02);
@@ -1694,6 +2110,11 @@ function drawTopBar() {
 
   // 兼容性指示
   drawCompatibility();
+
+  /* 把这一帧实测到的顶栏高度写回布局用。
+     竖屏下顶栏折行后可能有两三行，网格必须从这里往下让开。 */
+  const measured = (rowMaxY - 23) + 23 + 20;
+  if (S.toolbar_h !== measured) S.toolbar_h = measured;
 }
 
 function insIcon(index, x, y, selected, collapse) {
@@ -1727,8 +2148,17 @@ function insIcon(index, x, y, selected, collapse) {
 
 function drawCompatibility() {
   const rw = S.rw;
+  /* 竖屏：这块硬编码在右上角 y=24..49，而折行工具条会长到那个位置，
+     两者必然重叠。窄屏下把文字省掉、只留两个兼容性图标，
+     并贴到标签页那一行的右侧（y=1..19）—— 那里一定有空位。
+     图标本身仍可点击开兼容性窗口，信息不丢。 */
+  const narrow = !!S.portrait;
+  const top = narrow ? 1 : 24;
+  const iconY = narrow ? 0 : 25;
+  const iconSize = narrow ? 18 : 20;
+  const rightPad = 10;
   setColor(C.separator);
-  line(rw - 34, 26, rw - 34, 44);
+  if (!narrow) line(rw - 34, 26, rw - 34, 44);
   let label = '', col = COL.red, icon = 2;
   if (S.compatible === 1) { label = '完全兼容'; col = S.dark ? COL.lime : COL.green; icon = 0; }
   else if (S.compatible === 2) { label = '仅限数据包'; col = COL.orange; icon = 1; }
@@ -1739,7 +2169,7 @@ function drawCompatibility() {
   // 两个 20px 图标分别画在 rw-59 和 rw-30（占 rw-59..rw-39 与 rw-30..rw-10），
   // 所以文字必须结束在 rw-65 才不会和图标挤在一起。
   // 之前写成 rw - 8（右对齐到最右边），文字直接压在两个图标上——就是「文字和两个图标重合」的原因。
-  text(rw - 65, 28, label, 'right');
+  if (!narrow) text(rw - 65, 28, label, 'right');
   setFont(FONT.main());
   // 对照 control_draw.gml:1953-2025：spr_minecraft_f 的前 6 帧（0-2 与 +3 的暗色版）
   // 只是「线框」，真正上色的是后面 6/7/8 三帧的实心填充，并且用 accent 染色叠在
@@ -1749,16 +2179,20 @@ function drawCompatibility() {
   // 之前只画了线框没画填充，所以右上角只看到两个空心圈。
   const accentIdx = 6 - 2 * (!S.fdark ? 1 : 0);
   const fillTint = T.accent[accentIdx];
-  const offs = [rw - 30, rw - 59];
+  const iconR = rw - rightPad;
+  const offs = narrow ? [iconR - iconSize, iconR - iconSize * 2 - 4] : [rw - 30, rw - 59];
   const frames = S.compatible === 1 ? [0, 0] : (S.compatible === 2 ? [0, 1] : [2, 1]);
   for (let i = 0; i < 2; i++) {
-    drawSprite('spr_minecraft_f', S.fdark ? 3 + frames[i] : frames[i], offs[i], 25);
-    drawSprite('spr_minecraft_f', frames[i] + 6, offs[i], 25, 1, 1, fillTint);
+    const sc = narrow ? iconSize / 20 : 1;
+    drawSprite('spr_minecraft_f', S.fdark ? 3 + frames[i] : frames[i], offs[i], iconY, sc, sc);
+    drawSprite('spr_minecraft_f', frames[i] + 6, offs[i], iconY, sc, sc, fillTint);
   }
   const compx = Math.max(120, textWidth(label) + 60);
-  if (mouseRectangle(rw - compx, 24, compx, 25) && !isDialogWindow(S.window)) {
+  const hitX = narrow ? (iconR - iconSize * 2 - 4) : (rw - compx);
+  const hitW = narrow ? (iconSize * 2 + 4) : compx;
+  if (mouseRectangle(hitX, top, hitW, iconSize + 6) && !isDialogWindow(S.window)) {
     G.cursor = 'pointer';
-    popupSet(rw - compx, 24, compx, 25, S.compatible === 1 ? '此歌曲兼容 schematic 和数据包。' : (S.compatible === 2 ? '此歌曲仅兼容数据包。' : '此歌曲仅兼容带资源包的数据包。'));
+    popupSet(hitX, top, hitW, iconSize + 6, S.compatible === 1 ? '此歌曲兼容 schematic 和数据包。' : (S.compatible === 2 ? '此歌曲仅兼容数据包。' : '此歌曲仅兼容带资源包的数据包。'));
     if (G.mbp[0]) { S.playing = 0; S.window = W_COMPATIBILITY; }
   }
 }
@@ -1810,45 +2244,58 @@ function drawStatusBar() {
 function drawInfoBoxes() {
   const x1 = S.x1, y1 = S.y1;
   const c = G.ctx;
+
+  /* 【竖屏重排】
+     这一整块原本硬编码在 y = 50..79、x = 9..248（时间、小节.拍、速度、音色名）。
+     桌面布局里正好落在顶栏下方的空白区，但竖屏顶栏会折行成 3~4 行、
+     一直长到 y≈150，这一块就会被工具条图标压住（截图里能直接看到重叠）。
+     所以竖屏下把整块【整体下移】到折行工具条之后，而不是隐藏它 ——
+     速度和进度是高频查看/修改的东西，藏起来反而更难用。
+     横屏时 dy = 0，坐标和原来逐像素一致。 */
+  /* dy 把时间/速度块从原始的 y=50 挪到「折行工具条下方」。
+     目标：块顶(50) 落在 toolbar_h + 6，块底(79) 落在 toolbar_h + 35，
+     正好塞进 info_h = 40 那条带里，不会越过 y1 去压时间轴刻度。 */
+  const dy = S.portrait ? ((S.toolbar_h || 52) + 6 - 50) : 0;
+  const ty = (v) => v + dy;
+
   // 播放时间
   setFont(FONT.info_med_bold(15));
   setColor(C.text);
-  if (S.theme === 3) text(9, 50, timeStr(S.marker_pos / S.tempo));
-  else text(93, 50, timeStr(S.marker_pos / S.tempo), 'right');
+  if (S.theme === 3) text(9, ty(50), timeStr(S.marker_pos / S.tempo));
+  else text(93, ty(50), timeStr(S.marker_pos / S.tempo), 'right');
   setFont(FONT.small());
   setColor(C.textDim);
-  text(S.theme === 3 ? 26 : 93 - 67, 69, '/ ' + timeStr(S.enda / S.tempo));
+  text(S.theme === 3 ? 26 : 93 - 67, ty(69), '/ ' + timeStr(S.enda / S.tempo));
   setFont(FONT.main());
 
   // 小节.拍.十六分
   setColor(C.dark ? '#2f2f2f' : '#ffffff');
-  roundRect(184, 57, 248, 79, 4, true);
+  roundRect(184, ty(57), 248, ty(79), 4, true);
   setColor(C.controlBorder);
-  roundRect(184.5, 57.5, 247.5, 78.5, 4, false);
+  roundRect(184.5, ty(57.5), 247.5, ty(78.5), 4, false);
   setFont(FONT.small());
   setColor(C.text);
-  text(240, 61, floor(S.marker_pos / (S.timesignature * 4)) + 1, 'right');
-  text(232, 61, '.');
-  text(225, 61, floor((S.marker_pos / 4) % S.timesignature) + 1, 'right');
-  text(217, 61, '.');
-  text(210, 61, floor(S.marker_pos % 4) + 1, 'right');
-  popupSet(184, 57, 64, 22, '歌曲的进度（小节.拍.十六分）');
+  text(240, ty(61), floor(S.marker_pos / (S.timesignature * 4)) + 1, 'right');
+  text(232, ty(61), '.');
+  text(225, ty(61), floor((S.marker_pos / 4) % S.timesignature) + 1, 'right');
+  text(217, ty(61), '.');
+  text(210, ty(61), floor(S.marker_pos % 4) + 1, 'right');
+  popupSet(184, ty(57), 64, 22, '歌曲的进度（小节.拍.十六分）');
 
   // 速度框
   const useBpm = S.use_bpm;
-  const bw = useBpm ? 70 : 64;
   setColor(C.dark ? '#2f2f2f' : '#ffffff');
-  roundRect(108, 57, 108 + 64, 79, 4, true);
+  roundRect(108, ty(57), 108 + 64, ty(79), 4, true);
   setColor(S.window === W_SETTEMPO ? C.accent : C.controlBorder);
-  roundRect(108.5, 57.5, 171.5, 78.5, 4, false);
+  roundRect(108.5, ty(57.5), 171.5, ty(78.5), 4, false);
   setFont(FONT.small());
   setColor(C.text);
   const bpm = S.tempo * 15;
-  text(140, 61, useBpm ? bpm.toFixed(2) + ' BPM' : S.tempo.toFixed(2) + ' t / s', 'center');
-  popupSet(108, 57, 64, 22, useBpm ? '歌曲的速度（拍数/分钟）\n拖拽来大致更改，点击来手动输入，右键查看更多选项。'
+  text(140, ty(61), useBpm ? bpm.toFixed(2) + ' BPM' : S.tempo.toFixed(2) + ' t / s', 'center');
+  popupSet(108, ty(57), 64, 22, useBpm ? '歌曲的速度（拍数/分钟）\n拖拽来大致更改，点击来手动输入，右键查看更多选项。'
     : '歌曲的速度（红石刻/秒）\n拖拽来大致更改，点击来手动输入，右键查看更多选项。');
   setFont(FONT.main());
-  if (mouseRectangle(108, 57, 64, 22) && !isDialogWindow(S.window)) {
+  if (mouseRectangle(108, ty(57), 64, 22) && !isDialogWindow(S.window)) {
     G.cursor = 'pointer';
     if (G.mbr[0]) { S.window = W_SETTEMPO; focusText(64, String(S.tempo)); UI.inputWindow = W_SETTEMPO; UI.textEnter = () => commitTempo(); }
     if (G.mb[0] && (G.mouse.x !== S._mx || G.mouse.y !== S._my) && !S.tempoDrag) {
@@ -1900,7 +2347,11 @@ function drawPiano(xx, yy, k, totalcols) {
   // 对照 draw_piano.gml:12 `alpha = max(0, 3 - startkey) * !isplayer + 3 * isplayer`
   // 这是琴键两端渐隐用的 alpha（0..3），不是按键下沉的 down。
   // 循环末尾按 `if (a < 3) alpha += 1` / `if (a > k - min(5, 54-(startkey+k))) alpha -= 1` 变化。
-  let keyAlpha = Math.max(0, 3 - S.startkey);
+  /* drawer_piano_flat：竖屏抽屉里键数太少时（见 drawDrawerPiano 的说明），
+     把两端淡出整个关掉 —— 直接以 alpha=3（完全不透明）起步，
+     并且后续的 ±1 增减也不会把它拉下来，因为下面的判断里
+     `a < 3 && keyAlpha < 3` 与右端递减都依赖 keyAlpha 已在 3 以下。 */
+  let keyAlpha = S.drawer_piano_flat ? 3 : Math.max(0, 3 - S.startkey);
   for (let a = 0; a < k; a++) {
     const cc = (S.startkey + a) % 7;
     if (a > 0 && cc !== 2 && cc !== 5) {
@@ -1965,7 +2416,7 @@ function drawPiano(xx, yy, k, totalcols) {
       drawPianoKey(true, xx + 39 * a - 19, yy - 7, col1, keyAlpha, c1, k1, !out1 && S.show_keynumbers, d0);
       b += 2;
       if (a < 3 && keyAlpha < 3) keyAlpha += 1;
-      if (a > k - Math.min(5, 54 - (S.startkey + k))) keyAlpha -= 1;
+      if (!S.drawer_piano_flat && a > k - Math.min(5, 54 - (S.startkey + k))) keyAlpha -= 1;
     } else {
       const c1 = S.startkey + S.sharpkeys + b;
       const k1 = S.show_keyboard && S.piano_key[c1] > 0;
@@ -1995,7 +2446,7 @@ function drawPiano(xx, yy, k, totalcols) {
     //   if (a < 3 && alpha < 3) alpha += 1
     //   if (a > k - min(5, 54 - (startkey + k))) alpha -= 1
     if (a < 3 && keyAlpha < 3) keyAlpha += 1;
-    if (a > k - Math.min(5, 54 - (S.startkey + k))) keyAlpha -= 1;
+    if (!S.drawer_piano_flat && a > k - Math.min(5, 54 - (S.startkey + k))) keyAlpha -= 1;
   }
   if (selectedkey > -1) { S.selected_key = selectedkey; S.selected_vel = 100; S.selected_pan = 100; S.selected_pit = 0; }
   // 滚动换八度
