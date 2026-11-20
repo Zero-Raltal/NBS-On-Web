@@ -36,6 +36,14 @@ const CBND_INSTRUMENT_ORDER = [
   'chime', 'xylophone', 'iron_xylophone', 'cow_bell', 'didgeridoo', 'bit', 'banjo', 'pling',
 ];
 
+/* 指令 txt 导入的默认速度 = 20 t/s。
+   依据：txt 里没有速度信息（指令按刻编号，每一刻的实际时长完全取决于
+   红石循环装置），而最常用的做法是「不设延迟的循环命令方块」——
+   游戏刻固定 20 Hz，所以这种装置的播放速度就是 20 t/s。
+   cbnote 自己的指令导出也按 20 t/s 的循环速度设计（每刻一条指令）。
+   用户导入后仍可在左上角速度框调整。 */
+const CMDTEXT_DEFAULT_TEMPO = 20;
+
 /* cbnote 的音符 key 与 NBS 的 key 是同一套编号：
    keyToPitch(key) = 2^((key-54)/12)，而 Minecraft 的 note.harp pitch 也以 C4(=54) 为 1.0，
    NBS 的 play_sound 又是 0.5*2^((key-78)/12)。
@@ -433,12 +441,6 @@ function soundToInstrumentId(name) {
 
 /* 解析整份指令文本，返回 { tempo, notes, loop, songLength, stats }
  *
- * tempo 的处理：txt 里【没有】速度信息（指令是按刻编号的，刻的实际时长取决于
- * 世界里的循环装置）。cbnote 自己的 txt 导出也不含 tempo。
- * 因此这里给一个可配置的默认值，由调用方（导入对话框）让用户改。
- */
-/* 解析整份指令文本，返回 { tempo, notes, loop, songLength, stats }
- *
  * cbnote 的指令有两种形态（详见 parsePlaysoundCommand 里的注释）：
  *   · 显式刻：execute as @a[scores={t=1}] …            → tick 0
  *   · 取反式：execute as @a[scores={t=-1..}] … unless entity @s[scores={t=!1..2}] …
@@ -446,7 +448,7 @@ function soundToInstrumentId(name) {
  * 两种都由 parsePlaysoundCommand 归一成 ticks 数组，这里只负责展开成音符。
  *
  * tempo：txt 里没有速度信息（指令按刻编号，每刻实际时长取决于循环装置），
- * 用参数给的默认值，导入后用户可在左上角速度框调整。
+ * 用 CMDTEXT_DEFAULT_TEMPO（20 t/s，即无延迟循环命令方块的速度）。
  */
 function parseCommandText(raw, options) {
   const opt = options || {};
@@ -513,7 +515,9 @@ function parseCommandText(raw, options) {
   uniq.sort((a, b) => a.tick - b.tick || a.instrument - b.instrument || a.key - b.key);
 
   return {
-    tempo: opt.tempo || 10,
+    /* 同样用 isFinite 判断：opt.tempo 若显式传 0 就保留 0，
+       交给 applyCbndImport 的 clamp 处理，而不是静默换成默认值。 */
+    tempo: Number.isFinite(Number(opt.tempo)) ? Number(opt.tempo) : CMDTEXT_DEFAULT_TEMPO,
     notes: uniq,
     loop: null,
     songLength: uniq[uniq.length - 1].tick + 1,
@@ -545,7 +549,10 @@ function applyCbndImport(result, songName) {
 
   // 先重置歌曲（保留前 16 个内置音色，reset() 会把自定义音色清掉）
   reset();
-  S.tempo = Math.max(0.25, Math.min(30, result.tempo || 10));
+  /* 用 isFinite 而不是 `||` 判断 —— `||` 会把合法的 0 也当成缺失值。
+     .cbnd 自带 tempo（8 位，可能为 0 的损坏文件），txt 则总是走默认值。 */
+  const tIn = Number(result.tempo);
+  S.tempo = Math.max(0.25, Math.min(30, Number.isFinite(tIn) ? tIn : CMDTEXT_DEFAULT_TEMPO));
   S.filename = songName || '';
 
   /* ---- 1. 先按「同乐器同刻同 key」去重，再算每种乐器需要多高的层带 ---- */
@@ -703,11 +710,11 @@ function importCommandTextDialog() {
   pickFile('.txt,.log,.mcfunction,.cmds,text/plain', (ab, name) => {
     try {
       const raw = decodeTextSmart(ab);
-      const result = parseCommandText(raw, { tempo: 10 });
+      const result = parseCommandText(raw, { tempo: CMDTEXT_DEFAULT_TEMPO });
       const n = applyCbndImport(result, name);
       setMsg('已从指令文本导入 ' + n + ' 个音符（' + result.stats.commandLines + ' 条 playsound，'
         + result.stats.distinctTicks + ' 个刻，' + result.stats.instruments + ' 种乐器各自分到独立层）'
-        + '．速度按默认 10 t/s，可用左上角速度框调整');
+        + '．速度按 20 t/s（无延迟循环命令方块的速度），可在左上角速度框调整');
     } catch (e) {
       messageDialog('导入指令文本失败：\n' + e.message, '错误');
     }
