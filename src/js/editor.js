@@ -258,7 +258,7 @@ function handleGlobalKeys() {
     if (K['PageUp']) S.starta = Math.min(S.enda, S.starta + S.totalcols);
     if (K['PageDown']) S.starta = Math.max(0, S.starta - S.totalcols);
   }
-  if (K['Enter']) { S.playing = 0; S.marker_pos = 0; S.marker_prevpos = 0; }
+  if (K['Enter']) { S.playing = 0; S.marker_pos = 0; S.marker_prevpos = 0; stopScheduledAudio(); }
   if (K[' ']) { togglePlaying(S.totalcols); }
   if (K['F7']) setMsg('帧率上限切换');
   if (K[' '] || K['ArrowLeft'] || K['ArrowRight'] || K['Home'] || K['End']) { }
@@ -368,17 +368,22 @@ function handlePlayback(dt) {
       S.timestoloop--;
       S.starta = S.loopstart;
       S.marker_pos = S.starta;
+      /* 循环回绕：上一轮可能已经把「曲尾之后」的音符排进未来时间轴了
+         （排期游标会一直往前推）。这里必须撤销，否则回绕瞬间会有一串
+         属于上一轮尾巴的音符冒出来，和本轮开头的音重叠。 */
+      stopScheduledAudio();
       setPlayAnchor(S.marker_pos);   // 跳回循环起点，重建音频锚点
       S.sched_col = floor(S.marker_pos);   // 排期游标跟着回到循环起点
       S.metronome_played = -1;
       if (S.sb_val) S.sb_val[0] = S.starta;
       if (S.loopmax !== 0 && S.timestoloop < 0) {
         S.playing = 0; S.marker_pos = 0; S.marker_prevpos = 0; S.timestoloop = S.loopmax;
+        stopScheduledAudio();
       }
     }
-    if (S.marker_pos > S.enda + totalcols) { S.marker_pos = S.enda + totalcols; S.playing = 0; }
+    if (S.marker_pos > S.enda + totalcols) { S.marker_pos = S.enda + totalcols; S.playing = 0; stopScheduledAudio(); }
     if (S.marker_end && S.marker_pos >= S.section_end && S.marker_prevpos < S.section_end) {
-      S.marker_pos = S.section_end; S.playing = 0;
+      S.marker_pos = S.section_end; S.playing = 0; stopScheduledAudio();
     }
     // 跟随进度条（对照 control_draw.gml:1090-1106）
     // 注意源码只有两个分支：pagebypage = 1（按页）走「翻页」逻辑，
@@ -516,7 +521,17 @@ function playColumnRange(start, end, audioWhen) {
   }
 }
 
+/* 暂停/跳转/停止时调用：撤销已排进未来的音符。
+   播放器会提前 0.25~1.5 秒把音符交给音频引擎（为了后台降频不漏音），
+   所以任何让播放位置「不再往前走」或「跳到别处」的操作都必须撤掉这些排期，
+   否则会出现「点了暂停还在响」「刻度线没到就播了那个音」。
+   详见 audio.js 的 audioCancelScheduled。 */
+function stopScheduledAudio() {
+  if (typeof audioCancelScheduled === 'function') audioCancelScheduled();
+}
+
 function togglePlaying(cols) {
+  const wasPlaying = S.playing;
   S.playing = S.playing ? 0 : 1;
   if (S.playing === 1) {
     if (S.marker_pos === S.enda + cols) S.marker_pos = 0;
@@ -542,6 +557,11 @@ function togglePlaying(cols) {
     S.sched_col = xx + 1;
   } else {
     S.timestoloop = S.loopmax;
+    /* 暂停：必须撤掉已经提前排进未来时间轴的音符。
+       不撤的话，暂停后还会继续响一小段（最多前瞻窗口那么长），
+       而且那些音的刻位比当前刻度线更靠后 —— 正是「没到那个音符却响了」。
+       正在响的音保持自然衰减，与原版「暂停只是不再投递新音符」的语义一致。 */
+    if (wasPlaying) stopScheduledAudio();
   }
 }
 
@@ -742,6 +762,9 @@ function handleTimelineInput() {
   // 正在拖播放标记
   if (S.window === W_DRAGMARKER) {
     S.marker_pos = (G.mouse.x - gx) / 32 + floor(S.starta);
+    /* 拖动标记会移动播放位置，已排期的未来音符必须作废，
+       否则拖动后那些旧排期还会在原来的时刻响起。 */
+    stopScheduledAudio();
     G.cursor = 'ew-resize';
     if (!G.mb[0]) S.window = W_RELEASE;
     return;
@@ -794,6 +817,8 @@ function handleTimelineInput() {
     if (G.mbp[0] && !S.cursmarker) S.timeline_pressa = floor(S.starta) + floor((G.mouse.x - gx) / 32);
     if (G.mbr[0] && !S.cursmarker) {
       S.marker_pos = floor(S.starta) + (G.mouse.x - gx) / 32;
+      // 点了时间轴 = 跳转播放位置，作废已排期的未来音符
+      stopScheduledAudio();
       S.timeline_pressa = -1;
     }
     if (G.mb[0] && !S.cursmarker && S.timeline_pressa > -1) {
@@ -1578,7 +1603,7 @@ function drawTopBar() {
   if (drawIcon(ICON.SAVE, xx, yy, '保存歌曲')) saveSongFile(false); xx += 25 + 4;
   drawSeparator(xx, yy + 3); xx += 4;
   if (drawIcon(S.playing ? ICON.PAUSE : ICON.PLAY, xx, yy, '播放 / 暂停')) togglePlaying(S.totalcols); xx += 25;
-  if (drawIcon(ICON.STOP, xx, yy, '停止歌曲')) { S.playing = 0; S.marker_pos = 0; S.marker_prevpos = 0; S.timestoloop = S.loopmax; } xx += 25;
+  if (drawIcon(ICON.STOP, xx, yy, '停止歌曲')) { S.playing = 0; S.marker_pos = 0; S.marker_prevpos = 0; S.timestoloop = S.loopmax; stopScheduledAudio(); } xx += 25;
   // 对照 draw_icon：这两个按钮按住期间持续生效（不再每帧清零，清零在 handleGlobalKeys 里做）
   if (!UI.blocked && G.mb[0] && mouseRectangle(xx, yy, 25, 25)) S.forward = -1;
   if (drawIcon(ICON.BACK, xx, yy, '快退')) S.forward = -1; xx += 25;

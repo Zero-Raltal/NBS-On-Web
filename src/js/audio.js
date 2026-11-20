@@ -94,10 +94,12 @@ function playSound(ins, key, vol, pan, pit, when) {
   src.connect(g); g.connect(p); p.connect(AU.master);
   /* when 必须是 ctx 时间轴上的绝对时刻；早于当下就立即播（start(0) 的语义是「马上」）。
      留 10ms 余量，避免边界上被判定为过去时刻。 */
-  const t = (typeof when === 'number' && isFinite(when)) ? Math.max(when, AU.ctx.currentTime) : 0;
+  const now = AU.ctx.currentTime;
+  const t = (typeof when === 'number' && isFinite(when)) ? Math.max(when, now) : 0;
   if (t > 0) src.start(t); else src.start();
+  const startedAt = t > 0 ? t : now;
 
-  const voice = { src, g, ins, key };
+  const voice = { src, g, p, ins, key, startAt: startedAt };
   AU.voices.push(voice);
   if (AU.voices.length > AU.maxVoices) {
     const old = AU.voices.shift();
@@ -110,6 +112,35 @@ function playSound(ins, key, vol, pan, pit, when) {
   };
   S.sounds = AU.voices.length;
   return 1;
+}
+
+/* 撤销「已经排进音频时间轴、但还没开始发声」的音符。
+ *
+ * 为什么需要它：播放器为了在后台降频时不漏音，会把未来约 0.25~1.5 秒的音符
+ * 提前 start(when) 交给音频引擎。这是正确的调度方式，但暂停/跳转时必须把
+ * 这些【未来的】音符撤掉，否则会出现：
+ *   · 点了暂停，声音还继续往外冒；
+ *   · 进度线明明还没到某个音符，暂停后它却响了。
+ *
+ * 语义刻意与 GML 对齐：GML 是「标记走到哪列才播那列」，暂停只是不再投递新音符，
+ * 已经在响的音自然衰减（audio_stop_all 全程没被调用过）。
+ * 所以这里【只撤未来未开始的】，不动正在响的 —— 否则每次暂停都会有一声突兀的断音。 */
+function audioCancelScheduled() {
+  if (!AU.ctx) return 0;
+  const now = AU.ctx.currentTime;
+  let n = 0;
+  for (let i = AU.voices.length - 1; i >= 0; i--) {
+    const v = AU.voices[i];
+    // 留 5ms 容差：正好在边界上的当作「已经开始了」，不当成未来音
+    if (v.startAt !== undefined && v.startAt > now + 0.005) {
+      try { v.src.stop(0); } catch (e) { }
+      try { if (v.g) v.g.disconnect(); if (v.p) v.p.disconnect(); } catch (e) { }
+      AU.voices.splice(i, 1);
+      n++;
+    }
+  }
+  S.sounds = AU.voices.length;
+  return n;
 }
 
 /* 播放一个已载入的 UI 音效，忽略「界面音效」开关。
