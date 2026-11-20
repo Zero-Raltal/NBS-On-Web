@@ -1,0 +1,21 @@
+# 依赖与构建缓存
+node_modules/
+package-lock.json
+
+# 开发工作区（不属于发布内容）
+tmp/
+publish/
+NoteBlockStudio-main/
+nbs-src/
+tools/
+.workbuddy/
+*.zip
+debug.log
+
+# 操作系统 / 编辑器
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
