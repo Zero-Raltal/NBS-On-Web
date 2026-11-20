@@ -458,17 +458,106 @@ function setInstrument(i) {
 }
 
 /* ---------------------------------------------------------------- 窗口框架 */
-function dialogFrame(w, h) {
-  const x1 = floor(S.rw / 2 - w / 2), y1 = floor(S.rh / 2 - h / 2);
-  return { x1, y1, x2: x1 + w, y2: y1 + h, w, h };
+/* 对话框自适应：竖屏（手机）下很多窗口比屏幕还宽，会左右都超出视口，
+   底部的「确定/取消」被推到屏幕外，导致窗口点不到也关不掉。
+
+   做法：整窗等比缩放 + 居中夹紧。
+     · 宽或高超出可用区时按较小比例整体缩小（保持长宽比，
+       否则窗口内那些固定偏移的控件会互相压住）；
+     · 位置严格居中，且缩放后必然落在 [DLG_PAD, rw-DLG_PAD] 内。
+
+   关键点（第一版写错的地方）：不能只把 dialogFrame 的返回值缩小，
+   因为窗口内部所有控件都用 `f.x1 + 16` 这种【设计坐标】偏移绘制。
+   正确的做法是让 dialogFrame 返回【设计坐标】(0,0)-(w,h)，
+   同时由它自己安装画布变换 translate+scale，把设计空间映射到屏幕。
+   这样内部代码一个字都不用改，缩放对它们是透明的。
+   调用方（drawWindows）负责在窗口画完后 restore 画布与鼠标。
+   移位/回退这段逻辑会重现"按钮点不到"，不要改回去。 */
+const DLG_PAD = 8;          // 窗口与视口边缘的最小留白
+/* 最小缩放比：只是"尽量别缩太小"的下限，【不是硬约束】。
+   300px 级窄屏上 600x400 的窗口需要 0.507，比这个下限还小；
+   如果强行抬回下限，窗口就会重新溢出屏幕 —— 那正是要修的问题。
+   所以下面 dialogFit() 在冲突时优先保证"窗口不超出视口"，宁可字小一点。 */
+const DLG_MIN_SCALE = 0.55;
+
+function dialogFit(w, h) {
+  const availW = Math.max(80, S.rw - DLG_PAD * 2);
+  const availH = Math.max(80, S.rh - DLG_PAD * 2);
+  let k = 1;
+  if (w > availW) k = Math.min(k, availW / w);
+  if (h > availH) k = Math.min(k, availH / h);
+  /* 先按可用区算出的 k（保证一定放得下），再与"美观下限"取……注意是
+     取【更小】的那个不成立：下限的作用是防止过度缩小，但一旦下限比
+     所需的 k 还大，就放不下了。这里直接以"放得下"为准，下限仅用于
+     提示/日志，不参与计算 —— 早期把它 clamp 进去导致 320px 屏上
+     MIDI 导入窗口 x1 变成 -5，仍然溢出。 */
+  k = Math.max(0.2, k);
+  const dw = w * k, dh = h * k;
+  return {
+    k,
+    // 居中（缩放后按实际占位算，才不会因为取整偏一边）
+    tx: Math.round((S.rw - dw) / 2),
+    ty: Math.round((S.rh - dh) / 2),
+    w, h,
+  };
 }
-function closeWindow() { S.window = 0; blurText(); }
+
+function dialogFrame(w, h) {
+  const fit = dialogFit(w, h);
+  const c = G.ctx;
+  /* 注意：这里【只做变换，不做 save】。
+     成对的 save/restore 必须由调用方 drawWindows() 统一负责 ——
+     早期版本在这里 save、再靠 S.dlg_pending 标志在末尾 restore，
+     结果窗口内部一旦调用 closeWindow()（比如点「关闭」），
+     标志被清掉，restore 就被跳过，变换泄漏到后续所有绘制，
+     表现为"整个编辑器被缩小成一份副本叠在对话框位置"、
+     而且每帧再叠一层，越缩越小。 */
+  c.translate(fit.tx, fit.ty);
+  if (fit.k !== 1) c.scale(fit.k, fit.k);
+
+  /* 鼠标坐标反向映射到设计空间，保证"画在哪儿就能点在哪儿"。
+     不映射的话，缩放后所有 hit test 都会偏移，越靠右越点不准。 */
+  if (fit.k !== 1) {
+    G.mouse.x = (G.mouse.x - fit.tx) / fit.k;
+    G.mouse.y = (G.mouse.y - fit.ty) / fit.k;
+  }
+  S.dlg_fit = fit;
+  S.dlg_scale = fit.k;
+  S.dlg_origin = { x: fit.tx, y: fit.ty };
+
+  // 设计坐标：从 (0,0) 起，内部控件的固定偏移照旧有效
+  return { x1: 0, y1: 0, x2: w, y2: h, w, h, scale: fit.k };
+}
+
+/* 设计坐标 → 屏幕坐标。对话框内部打开的菜单（drawMenu 画在屏幕空间）
+   必须用它换算位置，否则缩放后会飘到别处。 */
+function dlgToScreen(x, y) {
+  const f = S.dlg_fit;
+  if (!f) return { x, y };
+  return { x: f.tx + x * f.k, y: f.ty + y * f.k };
+}
+
+function closeWindow() {
+  S.window = 0; S.dlg_scale = 1; S.dlg_origin = null; S.dlg_fit = null;
+  blurText();
+}
 
 function drawWindows() {
   UI.inputWindow = S.window;
-  if (!isDialogWindow(S.window)) return;   // 拖拽/瞬时状态不画遮罩、不锁交互
-  // 半透明遮罩
+  if (!isDialogWindow(S.window)) {
+    S.dlg_scale = 1; S.dlg_origin = null; S.dlg_fit = null;
+    return;   // 拖拽/瞬时状态不画遮罩、不锁交互
+  }
+  // 半透明遮罩（铺满整个视口，不受窗口缩放影响）
   setAlpha(0.18); setColor('#000000'); fillRect(0, 0, S.rw, S.rh); setAlpha(1);
+
+  /* 这一对 save/restore 是【无条件】的，覆盖整个 switch：
+     dialogFrame() 在里面做 translate/scale 并改写 G.mouse，
+     无论窗口内部是否提前 closeWindow()，这里都必须把状态还回去。
+     之前用 S.dlg_pending 做条件恢复，一旦 closeWindow() 清了标志就漏掉
+     restore，变换泄漏到后续绘制 —— 表现为整个界面被缩小叠在对话框位置。 */
+  const savedMouse = { x: G.mouse.x, y: G.mouse.y };
+  G.ctx.save();
   switch (S.window) {
     case W_SONGINFOEDIT: drawSongInfo(); break;
     case W_PROPERTIES: drawProperties(); break;
@@ -494,6 +583,11 @@ function drawWindows() {
     case W_DATAPACK_EXPORT: drawDatapackExport(); break;
     default: S.window = 0; break;   // 未知窗口：立即关闭，绝不留灰屏
   }
+  /* 与上面的 save() 严格配对。用保存的鼠标快照还原，
+     而不是 S.dlg_prev_mouse —— 后者在 closeWindow() 里会被清掉。 */
+  G.ctx.restore();
+  G.mouse.x = savedMouse.x;
+  G.mouse.y = savedMouse.y;
 }
 
 function okCancel(f, onOk, okLabel, cancelLabel) {
@@ -774,10 +868,12 @@ function openInsPressMenu(idx, row) {
   //   show_menu_ext("instruments_press", x1 + 18 + 194 + 235, y1 + 106 + 20 * a, ...)
   //   menu.menub = b
   // 位置同样是跟行的固定坐标，不是鼠标位置。
-  const x1 = floor(S.rw / 2 - 275), y1 = floor(S.rh / 2 - 175);
+  // 注意：这里的位置是【设计坐标】(以窗口左上角为原点)，而 drawMenu 画在屏幕空间，
+  // 所以必须经 dlgToScreen() 换算 —— 竖屏缩放后直接当屏幕坐标用会飘走。
+  const sp = dlgToScreen(18 + 194 + 235, 106 + 20 * (row | 0));
   const m = showMenu('instruments_press',
-    x1 + 18 + 194 + 235,
-    y1 + 106 + 20 * (row | 0), str);
+    sp.x,
+    sp.y, str);
   m.insIdx = idx;
   m.menub = idx;
   return m;
@@ -802,10 +898,11 @@ function openInsPitchMenu(idx, row) {
     }
   }
   str += '/';
-  const x1 = floor(S.rw / 2 - 275), y1 = floor(S.rh / 2 - 175);
+  // 设计坐标 → 屏幕坐标（竖屏缩放后必须换算，否则菜单错位）
+  const sp = dlgToScreen(18 + 194 + 155, 106 + 20 * (row | 0));
   const m = showMenu('instruments_pitch',
-    x1 + 18 + 194 + 155,
-    y1 + 106 + 20 * (row | 0), str);
+    sp.x,
+    sp.y, str);
   m.insIdx = idx;
   m.menub = idx;          // 对照 draw_window_instruments.gml:218 `menu.menub = b`
   return m;
@@ -848,9 +945,12 @@ function drawPreferences() {
 
 function drawPreferencesBody() {
   const w = 500, h = 510;
-  const x1 = Math.max(8, floor(S.rw / 2 - w / 2));
-  const y1 = Math.max(8, floor(S.rh / 2 - h / 2));
-  const x2 = x1 + w, y2 = y1 + h;
+  /* 这里原来自己算位置（Math.max(8, rw/2 - w/2)），只挡住了左边和上边，
+     右边和下边仍然溢出 —— 竖屏下 500x510 的窗口会有大半在屏幕外，
+     分页标签和底部按钮都点不到。改成走 dialogFrame()，统一享受
+     "等比缩放 + 居中" 的适配逻辑。 */
+  const f = dialogFrame(w, h);
+  const x1 = f.x1, y1 = f.y1, x2 = f.x2, y2 = f.y2;
   drawWindow(x1, y1, x2, y2);
 
   // 标题
@@ -1197,8 +1297,10 @@ function drawAbout() {
 const MIDI_TABS = ['乐器', '打击乐', '轨道'];
 
 function drawMidiImport() {
-  const x1 = floor(S.rw / 2 - 300), y1 = floor(S.rh / 2 - 200);
-  const x2 = x1 + 600, y2 = y1 + 400;
+  /* 这是最大的一个窗口（600x400），原来直接按 rw/2-300 居中，
+     竖屏下左右各溢出 105px，底部按钮完全够不着。统一走 dialogFrame()。 */
+  const mf = dialogFrame(600, 400);
+  const x1 = mf.x1, y1 = mf.y1, x2 = mf.x2, y2 = mf.y2;
   drawWindow(x1, y1, x2, y2);
   // 对照 draw_window_midi_import.gml:12-17：Fluent 主题下顶部（选项区 0..148）
   // 单独铺一层浅灰圆角底（fdark 时是深灰），与下面的列表区区分开。
