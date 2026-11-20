@@ -40,8 +40,17 @@ html, body {
 #loading.hide { opacity: 0; pointer-events: none; }
 #loading .logo { font-size: 26px; font-weight: 700; color: #0078d4; letter-spacing: .5px; }
 #loading .barwrap { width: 260px; height: 4px; background: #dedede; border-radius: 2px; overflow: hidden; }
-#loading .bar { height: 100%; width: 0%; background: #0078d4; transition: width .15s; }
+/* 进度条宽度由【顶层 <style>】在文档解析过程中逐段改写（见 tools/progress.js）。
+   单文件版把 JS 内联在文档末尾，下载期间一行 JS 都没跑，
+   所以这条路子必须由 CSS 自己走完：payload 每解析完一段，
+   后面那条 <style> 就把宽度往前推一格；网络卡住它就真的停住。
+   注意这里用 .bar 的类选择器，构建时插入的是 `#loading #loadbar`（两个 id），
+   特异性更高，所以能覆盖本行的 width:0%。 */
+#loading .bar { height: 100%; width: 0%; background: #0078d4; transition: width .28s ease-out; }
 #loading .msg { font-size: 12px; color: #666; }
+/* 真正的完成（JS 已跑起来）由 main.js 加 .js-takeover + .done，
+   这时才允许 100% —— 用 !important 盖过 setProgress 写的 inline width。 */
+#loading .barwrap.done .bar { width: 100% !important; transition: width .12s; }
 
 /* 启动文字与三个脉冲点（照 cbnote 的 dotPulse 动画）。
    这段 CSS 不依赖任何 JS，所以 JS 还没加载完时动画已经在跑，

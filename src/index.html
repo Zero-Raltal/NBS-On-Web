@@ -6,6 +6,14 @@
 <title>Note Block Studio</title>
 <meta name="description" content="Note Block Studio 的网页移植版：在浏览器里编辑 Minecraft 音符盒歌曲，支持 NBS/CBND/MIDI/数据包导入与 schematic 导出。">
 <meta name="theme-color" content="#4a3a2a">
+<!-- 【这是源码版入口，不是给用户用的】
+     本页需要加载 21 个 JS + 88 个素材，共约 114 个请求。
+     在 GitHub Pages 上冷缓存首次打开要 2 分钟以上（实测约 132 秒），
+     因为瓶颈是并发请求的排队，而不是体积。
+     普通访问请用仓库根目录的 index.html —— 那是单文件压缩版，
+     全部内联，同样的内容只要约 1~6 秒。
+     保留本文件只是为了改代码时能按模块调试。 -->
+<meta name="robots" content="noindex">
 <!-- 图标用 Note Block Studio 原版的音符盒图标（取自源码包 datafiles/Data/icon.ico）。
      .ico 里打包了 16~256 多档，浏览器自己挑合适的尺寸；
      再给 iOS 主屏和 PWA 各指定一张 PNG。 -->
@@ -24,11 +32,15 @@
        这段是【纯 HTML + CSS】，不含任何 JS 依赖，且放在所有脚本标签之前，
        所以在 JS 还没下载/解析完的时候浏览器就能立刻画出来 —— 用户不会对着白屏等。
        动画与 cbnote 同款：文字后面的三个点依次脉冲（纯 CSS @keyframes）。
-       进度条和文字由 main.js 在启动过程中更新；JS 完全没起来时这里就停在初始文案。 -->
+       进度条和文字由 main.js 在启动过程中更新；JS 完全没起来时这里就停在初始文案。
+
+       进度条在"JS 还没跑"的阶段也不是假的：单文件版把大块 payload 切成多段，
+       段与段之间插了顶层 <style>，解析到哪一段就把宽度推到哪一格。
+       那是真实的解析进度（网络卡住它就真的停住），详见 tools/progress.js。 -->
   <div id="loading">
     <div class="logo">Note Block Studio</div>
     <div class="boottext">正在加载 Javascript<span class="bd bd1">.</span><span class="bd bd2">.</span><span class="bd bd3">.</span></div>
-    <div class="barwrap"><div class="bar" id="loadbar"></div></div>
+    <div class="barwrap" id="barwrap"><div class="bar" id="loadbar"></div></div>
     <div class="msg" id="loadmsg">正在载入界面素材...</div>
   </div>
 </div>

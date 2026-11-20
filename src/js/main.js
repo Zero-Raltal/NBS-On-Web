@@ -139,6 +139,12 @@ async function boot() {
   const bar = document.getElementById('loadbar');
   const msg = document.getElementById('loadmsg');
   const setProgress = (p, m) => {
+    /* JS 跑起来之后由我们接管进度条（这时才有真实的资源载入进度）。
+       注意这里写 inline style，会盖过构建时插入的分段 <style>，
+       所以一旦 JS 接管，CSS 那条"解析进度"就自然退场了。
+       另外给 barwrap 加 .js-takeover，让 .done 规则能盖过 inline style。 */
+    const wrap = document.getElementById('barwrap');
+    if (wrap && !wrap.classList.contains('js-takeover')) wrap.classList.add('js-takeover');
     bar.style.width = Math.round(clamp(p, 0, 1) * 100) + '%';
     if (m) msg.textContent = m;
   };
@@ -174,6 +180,9 @@ async function boot() {
   }
 
   setProgress(1, '准备就绪');
+  // 真正的完成信号：让 CSS 那条规则把宽度坐实到 100%（盖过 inline style）
+  const wrapEl = document.getElementById('barwrap');
+  if (wrapEl) wrapEl.classList.add('done');
   document.getElementById('loading').classList.add('hide');
 
   // 首次交互后恢复音频上下文
