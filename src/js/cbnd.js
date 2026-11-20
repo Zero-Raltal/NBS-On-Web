@@ -187,9 +187,10 @@ function normalizeCommandText(raw) {
   //    只处理行首，正文里的斜杠（如 minecraft:block/note_block）绝不能动。
   const lines = s.split('\n').map(line => {
     let t = line.trim();
-    // 8. 注释行
-    if (/^#/.test(t) || /^\/\//.test(t)) return '';
-    // 去掉行首的 / 或 \（允许重复，允许之间夹空格）
+    /* 去掉行首的 / 或 \（允许重复，允许之间夹空格）。
+       注意这里不能顺手把 `//` 当注释删掉 —— vanilla 的「多个斜杠」写法
+       `//execute` 就是这个形状，它其实是一条正常指令。注释统一在
+       stripComments() 里按「空白之后」判定，见下面的说明。 */
     t = t.replace(/^[\/\\][ \t]*/, '');
     t = t.replace(/^[\/\\][ \t]*/, '');
     // 7. 空白归一
@@ -200,28 +201,68 @@ function normalizeCommandText(raw) {
   return lines.join('\n');
 }
 
-/* 从归一化后的文本里抽出所有 playsound 指令行。
-   注意：续行拼接可能把两条指令并到一行（原文件里 `\` 后面跟的是另一条指令，
-   而不是同一条的续写）。这里按 `playsound` 的结束位置切开 ——
-   每条 playsound 指令的末尾是它的最后一个数字参数，之后如果还有
-   `execute`/`playsound` 就是下一条。
-   这样即使拼接在一起也能全部还原，不会丢音符。 */
-function extractPlaysoundLines(text) {
+/* 去掉一行里的注释。
+   只认「行首或空白之后」的 `//` 与 `#` —— 这样
+   `minecraft:block/note_block`（单个斜杠）和 `note.harp` 里的点都不会被误伤，
+   而 `... ~ ~ ~ 1 1 // 首拍` 这种行尾注释会被切掉。
+   各种生成器的注释风格差别很大，这里把 `//`、`#` 都当注释起始，
+   其余无法识别的写法在 extractExecuteBlocks() 里也会因为「不是 execute 块」而整行忽略。 */
+function stripComments(line) {
+  let s = String(line);
+  s = s.replace(/(^|\s)\/\/.*$/, '$1');
+  s = s.replace(/(^|\s)#.*$/, '$1');
+  return s;
+}
+
+/* 抽出所有 execute 指令块。
+ *
+ * 设计要点（为了兼容各家生成器的 txt）：
+ *   1. **只认 execute 块**。不是以 execute 开头的内容（说明文字、表头、
+ *      歌名、作者、时间戳、分隔线、纯注释……）一律忽略，不做任何猜测。
+ *      判据是「execute 作为命令起始词」：它前面只能是行首、空白、或换行，
+ *      并且后面必须是空格（`execute as` / `execute at` / `execute run`）。
+ *      这样纯说明文字里出现的单词 execute（例如「说明文字里提到 execute 也
+ *      不该被当成指令」）不会被误判成指令块。
+ *   2. **注释一律忽略**：整行注释与行尾注释都切掉，见 stripComments()。
+ *   3. **容忍前缀**：日志类导出常带 `[12:34:56] ` 或 `1. ` 之类的前缀，
+ *      这里从命令起始的 execute 开始取，前缀自然丢弃。
+ *   4. **容忍粘连**：续行拼接可能把两条指令并到一行，按每个 execute
+ *      起点重新切开，一条不漏。 */
+function extractExecuteBlocks(text) {
   const out = [];
-  for (const line of text.split('\n')) {
-    if (!/\bplaysound\b/i.test(line)) continue;
-    /* 按 `execute` 切分 —— 一条新指令以 execute 开头，而 playsound 是它的子命令，
-       绝不能拿 playsound 当切分点（那会把 `execute as @a[scores={t=1}] at @s run`
-       这段选择器整个丢掉，刻号全变成 undefined）。
-       若整行没有 execute（裸 playsound 指令），则原样保留。 */
-    const parts = /^\s*execute\b/i.test(line)
-      ? line.split(/(?=\bexecute\b)/i).map(s => s.trim()).filter(Boolean)
-      : [line.trim()];
-    for (const p of parts) {
-      if (/\bplaysound\b/i.test(p)) out.push(p);
+  for (const rawLine of String(text).split('\n')) {
+    const line = stripComments(rawLine).trim();
+    if (!line) continue;
+
+    /* 只认「命令起始位置」的 execute：
+         (?<=^|\s) 前面是行首或空白，且后面紧跟空白。
+       仅仅这样还不够 —— 说明文字里也会出现「……提到 execute 这个词……」，
+       剥掉前缀后 execute 也会落在行首。所以再加一道语法校验：
+       真正的 execute 后面必须紧跟它的子命令关键字（as / at / align / anchored /
+       facing / in / on / positioned / rotated / run / if / unless / summon）。
+       这一条来自 execute 的实际语法，因此不会误杀合法指令。 */
+    const re = /(^|\s)execute(?=\s+(?:as|at|align|anchored|facing|in|on|positioned|rotated|run|if|unless|summon)\b)/gi;
+    const starts = [];
+    let m;
+    while ((m = re.exec(line)) !== null) {
+      // m[0] 可能含前导空白，真正的 execute 起点要跳过它
+      starts.push(m.index + m[1].length);
+    }
+    if (!starts.length) continue;
+
+    for (let i = 0; i < starts.length; i++) {
+      const from = starts[i];
+      const to = (i + 1 < starts.length) ? starts[i + 1] : line.length;
+      const block = line.slice(from, to).trim();
+      if (block) out.push(block);
     }
   }
   return out;
+}
+
+/* 兼容旧调用点：抽出「含 playsound 的 execute 块」。 */
+function extractPlaysoundLines(text) {
+  return extractExecuteBlocks(text).filter(b => /\bplaysound\b/i.test(b));
 }
 
 /* 解析一条 playsound 指令，返回
@@ -410,10 +451,22 @@ function soundToInstrumentId(name) {
 function parseCommandText(raw, options) {
   const opt = options || {};
   const text = normalizeCommandText(raw);
-  const lines = extractPlaysoundLines(text);
 
+  /* 只认 execute 块：不是以 execute 开头的内容（表头、歌名、作者、时间戳、
+     分隔线、整行注释、各种生成器自带的说明）全部忽略。
+     注释在 extractExecuteBlocks() 里按「行首或空白之后」切掉，
+     所以行尾的 `// xxx`、`# xxx` 也不会污染参数解析。 */
+  const blocks = extractExecuteBlocks(text);
+  if (!blocks.length) {
+    throw new Error('没有找到任何 execute 指令。\n'
+      + '请确认文件是指令 txt（内容应形如 execute as @a[...] run playsound ...）。');
+  }
+
+  // 其中含 playsound 的才是音符；其余（setblock / scoreboard / 循环跳转…）忽略
+  const lines = blocks.filter(b => /\bplaysound\b/i.test(b));
   if (!lines.length) {
-    throw new Error('没有找到任何 playsound 指令。\n请确认文件是从 cbnote 导出的指令 txt。');
+    throw new Error('文件里有 ' + blocks.length + ' 条 execute 指令，但没有一条含 playsound。\n'
+      + '请确认导出时选的是「音符指令」而不是结构/红石指令。');
   }
 
   const parsed = [];
@@ -465,17 +518,26 @@ function parseCommandText(raw, options) {
     loop: null,
     songLength: uniq[uniq.length - 1].tick + 1,
     stats: {
+      executeBlocks: blocks.length,
       commandLines: lines.length,
       parsedGroups: parsed.length,
       distinctTicks: new Set(uniq.map(n => n.tick)).size,
+      instruments: new Set(uniq.map(n => n.instrument)).size,
     },
   };
 }
 
 /* ---------------------------------------------------------------- 写进歌曲
    把 { tempo, notes, loop } 应用到当前编辑器。
-   notes 按 tick 分组落到不同层，与 NBS 的行为一致：同一刻的多个音符放在不同层，
-   同一个刻同一个乐器同一个 key 只保留一个。
+
+   【按乐器分组】——参考 MIDI 导入的做法（midi.js:186-207）：
+     · 每种乐器占一段【连续层带】，层带起点 = 前面所有乐器高度之和
+     · 某乐器层带的高度 = 该乐器在同一刻的最大同时音符数
+     · 层带内放置时从带首往下找第一个空位，找不到就顺延（同乐器音符绝不跨到别的乐器层带）
+     · 层名写成乐器名，便于在图层面板辨认
+
+   这样导入后每种乐器独占自己的层，不会把 harp 和 bd 混在同一层里，
+   图层面板也能一眼看出哪层是哪个音色。
    返回实际写入的音符数。 */
 function applyCbndImport(result, songName) {
   const notes = result.notes || [];
@@ -486,53 +548,99 @@ function applyCbndImport(result, songName) {
   S.tempo = Math.max(0.25, Math.min(30, result.tempo || 10));
   S.filename = songName || '';
 
-  // 需要的层数 = 同一刻的最大音符数（去重后）
-  const byTick = new Map();
-  for (const n of notes) {
-    if (!byTick.has(n.tick)) byTick.set(n.tick, []);
-    byTick.get(n.tick).push(n);
-  }
-  let maxLayers = 1;
-  for (const arr of byTick.values()) {
+  /* ---- 1. 先按「同乐器同刻同 key」去重，再算每种乐器需要多高的层带 ---- */
+  const deduped = [];
+  const insSet = new Set();
+  {
     const seen = new Set();
-    let cnt = 0;
-    for (const n of arr) {
-      const sig = n.instrument + ':' + n.key;
+    for (const n of notes) {
+      const sig = n.instrument + ':' + n.tick + ':' + n.key;
       if (seen.has(sig)) continue;
       seen.add(sig);
-      cnt++;
+      deduped.push(n);
+      insSet.add(n.instrument);
     }
-    if (cnt > maxLayers) maxLayers = cnt;
   }
 
-  /* 层数：直接铺到 maxLayers 层。
-     不用 addLayer() —— 那个函数是「插入并下移」，用于界面上的加层；
-     这里歌曲刚 reset 过、全是空层，直接设 endb2 并保证数组够长即可。
-     上限 100 层（与原版一致）。 */
-  maxLayers = Math.min(maxLayers, 100);
-  if (S.layername.length < maxLayers) {
-    S.layername.length = maxLayers; S.layerlock.length = maxLayers;
-    S.layervol.length = maxLayers; S.layerstereo.length = maxLayers;
+  // 每种乐器在同一刻的最大同时音符数 = 它的层带高度
+  const heightOf = new Map();
+  {
+    const cnt = new Map();   // ins -> Map<tick,count>
+    for (const n of deduped) {
+      if (!cnt.has(n.instrument)) cnt.set(n.instrument, new Map());
+      const tmap = cnt.get(n.instrument);
+      tmap.set(n.tick, (tmap.get(n.tick) || 0) + 1);
+    }
+    for (const [ins, tmap] of cnt) {
+      let h = 1;
+      for (const c of tmap.values()) if (c > h) h = c;
+      heightOf.set(ins, h);
+    }
   }
-  S.endb2 = Math.max(1, maxLayers);
+
+  // 层带起点（按乐器编号升序，与 MIDI 导入按通道顺序排布同理）
+  const insOrder = Array.from(insSet).sort((a, b) => a - b);
+  const layerBase = new Map();
+  let yy = 0;
+  for (const ins of insOrder) {
+    layerBase.set(ins, yy);
+    yy += heightOf.get(ins) || 1;
+  }
+
+  // 上限 100 层（与原版一致）；超出部分丢弃
+  const MAXLAYERS = 100;
+  const totalLayers = Math.min(Math.max(1, yy), MAXLAYERS);
+  if (S.layername.length < totalLayers) {
+    S.layername.length = totalLayers; S.layerlock.length = totalLayers;
+    S.layervol.length = totalLayers; S.layerstereo.length = totalLayers;
+  }
+  S.endb2 = totalLayers;
   S.endb = Math.max(S.endb, S.endb2);
 
+  // ---- 2. 写层名 ----
+  for (const ins of insOrder) {
+    const base = layerBase.get(ins);
+    const h = heightOf.get(ins) || 1;
+    const nm = (INSTRUMENTS[ins] && INSTRUMENTS[ins].name) || ('Ins ' + ins);
+    for (let i = 0; i < h; i++) {
+      const L = base + i;
+      if (L >= MAXLAYERS) break;
+      S.layername[L] = nm;
+      S.layerlock[L] = 0; S.layervol[L] = 100; S.layerstereo[L] = 100;
+    }
+  }
+
+  // ---- 3. 放置音符：只在自己的乐器层带内找空位 ----
+  deduped.sort((a, b) => a.tick - b.tick || a.instrument - b.instrument || a.key - b.key);
   let written = 0;
-  for (const [tick, arr] of byTick) {
-    // 同一刻内去重：同乐器同 key 只放一个（cbnote 会对重复 tick 去重）
-    const seen = new Set();
-    let layer = 0;
-    for (const n of arr) {
-      const sig = n.instrument + ':' + n.key;
-      if (seen.has(sig)) continue;
-      seen.add(sig);
-      if (layer >= S.endb2) break;
+  for (const n of deduped) {
+    const base = layerBase.get(n.instrument);
+    if (base === undefined) continue;
+    const h = heightOf.get(n.instrument) || 1;
+    let placed = false;
+    for (let i = 0; i < h; i++) {
+      const L = base + i;
+      if (L >= MAXLAYERS) break;
       // addBlock(x, y, ins, key, vel, pan, pit, insnum)
       // insnum=true 表示「加载时用」：不递增乐器计数、不写历史，
       // 与 loadNBSToEditor 内部的做法一致。
-      addBlock(tick, layer, n.instrument, n.key, n.velocity, 100, 0, true);
-      written++;
-      layer++;
+      if (addBlock(n.tick, L, n.instrument, n.key, n.velocity, 100, 0, true)) {
+        written++; placed = true; break;
+      }
+    }
+    /* 该乐器层带内全满（同一刻音符数超过预估高度）时，往下顺延找空位，
+       但【不越过下一个乐器的层带起点】—— 宁可丢一个音，也不污染别的音色的层。
+       预估高度本来就是按真实峰值算的，正常不会走到这里。 */
+    if (!placed) {
+      const nextBase = (() => {
+        const idx = insOrder.indexOf(n.instrument);
+        return (idx + 1 < insOrder.length) ? layerBase.get(insOrder[idx + 1]) : totalLayers;
+      })();
+      for (let L = base + h; L < nextBase && L < MAXLAYERS; L++) {
+        if (addBlock(n.tick, L, n.instrument, n.key, n.velocity, 100, 0, true)) {
+          written++; placed = true; break;
+        }
+      }
     }
   }
 
@@ -597,8 +705,9 @@ function importCommandTextDialog() {
       const raw = decodeTextSmart(ab);
       const result = parseCommandText(raw, { tempo: 10 });
       const n = applyCbndImport(result, name);
-      setMsg('已从指令文本导入 ' + n + ' 个音符（' + result.stats.commandLines + ' 行 playsound，'
-        + result.stats.distinctTicks + ' 个刻）．速度按默认 10 t/s，可用左上角速度框调整');
+      setMsg('已从指令文本导入 ' + n + ' 个音符（' + result.stats.commandLines + ' 条 playsound，'
+        + result.stats.distinctTicks + ' 个刻，' + result.stats.instruments + ' 种乐器各自分到独立层）'
+        + '．速度按默认 10 t/s，可用左上角速度框调整');
     } catch (e) {
       messageDialog('导入指令文本失败：\n' + e.message, '错误');
     }
