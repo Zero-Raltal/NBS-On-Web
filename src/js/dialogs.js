@@ -216,10 +216,13 @@ function menuAction(menu, label, idx, spos, target) {
     else if (label === '清除最近歌曲') { localStorage.removeItem(RECENT_KEY); setMsg('已清除最近歌曲'); }
     else if (label.startsWith('<1 min') || label.startsWith('<')) { }
     else if (label === '导入片段......') pickFile('.nbp', (ab) => {
-      if (S.selected !== 0) { messageDialog('请先取消当前选区。', '提示'); return; }
-      const p = readPattern(ab);
-      S.clipboard = p.code;
-      actionPaste(S.starta, S.startb);
+      /* 用 patternImportBytes() 而不是 actionPaste()：
+         后者只把内容装进浮动选区，要玩家再点一次左键才落地（见 nbs.js 里的说明）。 */
+      try {
+        const r = patternImportBytes(ab);
+        if (!r.ok) { messageDialog(r.msg, '提示'); return; }
+        setMsg('片段已导入并放置在 ' + (r.x + 1) + ' 列 / ' + (r.y + 1) + ' 层');
+      } catch (e) { messageDialog('导入片段失败：' + e.message, '错误'); }
     });
     else if (label === '导出片段......') { if (S.selected) downloadBytes(buildPattern(), (S.song_name || 'pattern') + '.nbp'); }
     else if (label === '从 MIDI 文件导入......') pickFile('.mid,.midi', (ab, n) => { try { importMidi(ab, n); } catch (e) { messageDialog(e.message, '错误'); } });

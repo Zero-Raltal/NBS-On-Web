@@ -393,23 +393,95 @@ function endFrameInput() {
   G.keysPressed = {};
 }
 
-/* ---------------------------------------------------------------- 主循环 */
+/* ---------------------------------------------------------------- 主循环
+ *
+ * 【为什么不能只用 requestAnimationFrame】
+ *   浏览器在窗口最小化、或标签页切到后台时会【完全暂停】rAF 回调，
+ *   定时器（setTimeout/setInterval）则会被降频到最低 1 次/秒但仍会触发。
+ *   只靠 rAF 时，最小化期间 dt 一帧都不来，播放位置停在原地：
+ *   音频因为提前排期还能响一小会儿，然后就彻底没声了 —— 用户看到的就是
+ *   「窗口最小化后停止播放」。
+ *
+ *   所以这里做两件事：
+ *     1. 用 setInterval 做兜底驱动，rAF 停摆时仍然推进逻辑（降到 ~20Hz 够用，
+ *        界面绘制在最小化时本来也看不见，跳过即可）；
+ *     2. dt 用 performance.now() 的真实墙钟差计算，而不是依赖两次回调的间隔，
+ *        这样后台降频也不会让播放变慢。
+ *
+ *   恢复可见/聚焦时立刻补一帧，避免 dt 累积过大。
+ */
 function startLoop(cb) {
   let last = performance.now();
-  let acc = 0;
-  const step = (t) => {
-    let dt = (t - last) / 1000;
-    last = t;
-    if (dt > 0.1) dt = 0.1;      // 拖窗口后不要一次性补太多
+  let rafId = 0;
+  let timerId = 0;
+  let running = true;
+  // 后台兜底频率：定时器在后台被降频，20Hz 只在页面隐藏时用，不影响前台手感
+  const BG_MS = 50;
+
+  const tick = (t) => {
+    // t 可能来自 rAF（高精度时间戳），也可能来自定时器（用 performance.now 补齐）
+    const now = (typeof t === 'number' && isFinite(t)) ? t : performance.now();
+    let dt = (now - last) / 1000;
+    last = now;
+    // 上限 0.5s：后台长时间挂起后恢复时，不要一次性把整段都推进
+    // （否则音乐会「哗」地跳过一大段）。0.5s 足以让 20Hz 的兜底正常工作。
+    if (!isFinite(dt) || dt < 0) dt = 0;
+    if (dt > 0.5) dt = 0.5;
     G.dt = dt;
     G.time += dt;
     G.frame++;
     S.currspeed = 1;
     cb(dt);
     endFrameInput();
-    requestAnimationFrame(step);
   };
-  requestAnimationFrame(step);
+
+  const rafStep = (t) => {
+    if (!running) return;
+    tick(t);
+    rafId = requestAnimationFrame(rafStep);
+  };
+
+  const startRaf = () => {
+    if (rafId) return;
+    rafId = requestAnimationFrame(rafStep);
+  };
+  const stopRaf = () => {
+    if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+  };
+
+  /* 兜底定时器：只在「rAF 被暂停」时真正起作用。
+     判断方式 —— 记录上次 rAF 回调的时间，若超过 200ms 没来就认为被挂起，
+     由定时器接管推进；rAF 一恢复就让位。 */
+  timerId = setInterval(() => {
+    if (!running) return;
+    const idle = performance.now() - last;
+    if (idle > 200) tick(performance.now());   // rAF 停摆 → 定时器推进
+  }, BG_MS);
+  /* 这个定时器是永久性的。在浏览器里无所谓，但 Node 环境下（构建脚本、
+     测试 harness）一个永久 setInterval 会让进程永远不退出。
+     unref 只存在于 Node，浏览器里没有，所以做特性判断。 */
+  if (timerId && typeof timerId.unref === 'function') timerId.unref();
+
+  // 页面重新可见/聚焦时立刻补一帧，并重新启动 rAF（有些浏览器恢复后不会自动续）
+  const resume = () => {
+    if (!running) return;
+    last = performance.now() - 1;   // 只补很少一点，避免跳段
+    startRaf();
+  };
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) resume();
+  });
+  window.addEventListener('focus', resume);
+  window.addEventListener('pageshow', (e) => { if (e.persisted) resume(); });
+
+  const stop = () => {
+    running = false;
+    stopRaf();
+    if (timerId) { clearInterval(timerId); timerId = 0; }
+  };
+  window.__NBS_STOP_LOOP__ = stop;
+
+  startRaf();
 }
 
 /* ---------------------------------------------------------------- 画布 */

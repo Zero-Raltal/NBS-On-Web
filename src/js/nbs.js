@@ -229,6 +229,37 @@ function buildNBS(version) {
 /* ---------------------------------------------------------------- 片段 */
 // 对照 macros.gml:7 的 `#macro pat_version 1`
 const PAT_VERSION = 1;
+// 对照 GML pattern_import() 的落点选择（at_mouse_pos 分支）：
+//   有鼠标格坐标就用它，否则退回视口左上角。
+function patternImportTarget() {
+  if (S.selbx > -1 && S.selby > -1) return { x: S.selbx, y: S.selby };
+  return { x: floor(S.starta), y: floor(S.startb) };
+}
+
+/* 导入一个 .nbp 片段并【直接落地】。
+ *
+ * 为什么不能照搬原版只调 selection_load()：
+ *   NBS 的 action_paste 是把内容装进选区缓冲区，让选区浮着，等玩家再点一次
+ *   左键才由 selection_place() 落地。但导入片段时选区被放在「视口左上角」或
+ *   「鼠标格」，正好压在玩家接下来要点的位置上，于是第一次左键命中
+ *   selection_draw 里的拖动分支（window = w_dragselection），只开始拖动、
+ *   不落地；玩家必须【再点一次】才真正放下 —— 表现就是「导入片段无效」。
+ *
+ * 导入片段是一次性放置意图，所以这里 load 完立刻 place，
+ * 落点用 patternImportTarget()，与 pattern_import 的 at_mouse_pos 一致。 */
+function patternImportBytes(buf) {
+  if (S.selected !== 0) return { ok: false, msg: '请先取消当前选区。' };
+  const p = readPattern(buf);
+  if (!p.code) return { ok: false, msg: '这个片段里没有任何音符。' };
+  const t = patternImportTarget();
+  S.clipboard = p.code;
+  selectionLoadExt(t.x, t.y, p.code);
+  selectionPlace(false);        // ← 关键：立刻落地，不留浮动选区
+  S.changed = 1;
+  recalcSong();
+  return { ok: true, x: t.x, y: t.y };
+}
+
 // 对照 GML pattern_export()：版本号、歌曲长宽、选区列数、去压缩后的选区代码，
 // 然后是每列的 colfirst/collast（有符号字节）。
 function buildPattern() {
@@ -310,7 +341,12 @@ function loadSongDialog() {
     try {
       if (ext === 'nbs') { loadNBSToEditor(ab, name); addToRecent(name, ab); }
       else if (ext === 'mid' || ext === 'midi') importMidi(ab, name);
-      else if (ext === 'nbp') { const p = readPattern(ab); if (S.selected === 0) { S.clipboard = p.code; actionPaste(S.starta, S.startb); setMsg('片段已放置'); } }
+      else if (ext === 'nbp') {
+        /* 与「导入片段......」走同一个函数，导入后立刻落地，不留浮动选区 */
+        const r = patternImportBytes(ab);
+        if (!r.ok) messageDialog(r.msg, '提示');
+        else setMsg('片段已导入并放置在 ' + (r.x + 1) + ' 列 / ' + (r.y + 1) + ' 层');
+      }
     } catch (e) { messageDialog('打开失败：' + e.message, '错误'); }
   });
   if (S.changed) confirmDialogOn(ok => { if (ok) doOpen(); }, '当前歌曲尚未保存，确定要打开其他歌曲吗？', '打开歌曲');

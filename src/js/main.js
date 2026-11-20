@@ -192,9 +192,10 @@ async function boot() {
       if (ext === 'nbs') { loadNBSToEditor(ab, f.name); addToRecent(f.name, ab); }
       else if (ext === 'mid' || ext === 'midi') importMidi(ab, f.name);
       else if (ext === 'nbp') {
-        if (S.selected !== 0) { messageDialog('请先取消当前选区。', '提示'); return; }
-        S.clipboard = readPattern(ab).code;
-        actionPaste(S.starta, S.startb);
+        /* 拖拽打开：与菜单「导入片段」同一个函数，导入后立刻落地 */
+        const r = patternImportBytes(ab);
+        if (!r.ok) messageDialog(r.msg, '提示');
+        else setMsg('片段已导入并放置在 ' + (r.x + 1) + ' 列 / ' + (r.y + 1) + ' 层');
       } else messageDialog('不支持的文件类型：.' + ext, '错误');
     } catch (err) { messageDialog('打开失败：' + err.message, '错误'); }
   });
