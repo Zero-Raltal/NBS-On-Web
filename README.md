@@ -7,63 +7,85 @@
 
 ## 在线使用
 
-直接用浏览器打开就能用，无需服务器、无需安装：
+直接用浏览器打开仓库根目录的单文件版即可，无需服务器、无需安装：
 
-- **<https://zero-raltal.github.io/NBS-On-Web/>** —— 源码版（浏览器按需加载 `js/*.js` 与 `assets/`）
-- **<https://zero-raltal.github.io/NBS-On-Web/dist/noteblockstudio.min.html>** —— 单文件压缩版（HTML/CSS/JS 全部内联并压缩，所有素材以 LZ77 + base91 编码内嵌，可离线、可单文件分发）
+- **<https://zero-raltal.github.io/NBS-On-Web/>** —— 单文件压缩版（HTML/CSS/JS 全部内联并压缩，
+  所有素材以 LZ77 + base91 编码内嵌，打开即用；也可下载到本地双击打开，功能完全一致）
 
-单文件版也可以下载到本地双击打开，功能完全一致。
+根目录的 `noteblockstudio.html` 是同一内容的**未压缩可读版**，只用于调试（体积大，别当入口用）。
+
+### 为什么入口是单文件版，而不是源码版
+
+源码版（`src/index.html`）需要加载 21 个 JS 文件 + 88 个素材文件，冷缓存下实测：
+
+| 入口 | 请求数 | 就绪耗时（冷缓存） | 就绪耗时（热缓存） |
+|---|---|---|---|
+| 源码版 `src/index.html` | 114 | **约 132 秒** | 约 0.3 秒 |
+| 单文件版根 `index.html` | 1 | **约 6 秒** | 约 0.2 秒 |
+
+差距的来源不是体积（两者传输量接近，约 700KB），而是 **GitHub Pages 上 114 个并发请求的
+排队与连接开销**。所以默认入口用单文件版，源码版保留在 `src/` 供阅读和改代码。
+如果你只是要看/用，永远用根目录那个。
 
 ## 从源码运行
 
-浏览器出于安全限制不能直接读本地文件，需要用一个静态服务器打开：
+源码在 `src/`。浏览器出于安全限制不能直接读本地文件，需要一个静态服务器：
 
 ```bash
+cd src
 python -m http.server 8123
 # 然后访问 http://localhost:8123/index.html
 ```
 
-用 Chrome / Edge / Firefox 打开即可，无需安装。
+用 Chrome / Edge / Firefox 打开即可，无需安装。本地服务没有 Pages 的网络延迟，
+源码版在这个场景下很快就绪。
 
 ## 目录
 
-源码直接放在仓库根目录，`index.html` 就是源码版入口：
+根目录是发布产物，`src/` 是源码：
 
 ```
-index.html                源码版入口（按需加载 js/*.js、css/style.css）
+index.html                单文件压缩版（入口，全部内联，直接打开即用）
+noteblockstudio.html      单文件未压缩可读版（调试用，别当入口）
 favicon.ico               图标（取自原版 note block 图标，多尺寸）
 apple-touch-icon.png      iOS 主屏图标
 icon-512.png              PWA / 大尺寸图标
 manifest.webmanifest      PWA 清单
-dist/noteblockstudio.html      单文件可读版（调试用）
-dist/noteblockstudio.min.html  单文件压缩版（分发用）
-css/style.css             样式
-js/core.js                画布/输入/文本/图元
-js/touch.js               触屏与竖屏适配（长按=右键、拖动平移、抽屉）
-js/theme.js               主题与配色（经典 + 暗黑 + 复古 + Fluent）
-js/assets.js              图集与音色载入
-js/song.js                歌曲数据模型与增删改（对应 add_block 等）
-js/history.js             撤销栈
-js/selection.js           选区（对应 selection_*）
-js/macros.js              宏（对应 macro_*）
-js/audio.js               Web Audio 播放引擎
-js/nbs.js                 .nbs / .nbp 读写
-js/midi.js                MIDI 解析与导入
-js/mididevice.js          Web MIDI 输入设备（实时弹奏 / 录入）
-js/cbnd.js                cbnote 的 .cbnd / 指令 txt 导入
-js/render.js              音频离线渲染导出（WAV）
-js/schematic.js           schematic / 数据包导出（对应 export_schematic_*）
-js/ui.js                  控件库、菜单、消息框
-js/editor.js              主编辑器绘制与交互（对应 control_draw）
-js/dialogs.js             菜单动作与各类窗口
-js/main.js                启动与首选项持久化
-assets/atlas              从原项目提取的精灵图集（运行时使用）
-assets/sounds             原版音色（运行时使用）
+LICENSE                   许可
+README.md                 本文件
+
+src/index.html            源码版入口（按需加载 src/js/*.js）
+src/favicon.ico           图标（与根目录同一份）
+src/apple-touch-icon.png  iOS 主屏图标
+src/icon-512.png          PWA / 大尺寸图标
+src/manifest.webmanifest  PWA 清单
+src/css/style.css         样式
+src/js/core.js            画布/输入/文本/图元
+src/js/touch.js           触屏与竖屏适配（长按=右键、拖动平移、抽屉）
+src/js/theme.js           主题与配色（经典 + 暗黑 + 复古 + Fluent）
+src/js/assets.js          图集与音色载入
+src/js/song.js            歌曲数据模型与增删改（对应 add_block 等）
+src/js/history.js         撤销栈
+src/js/selection.js       选区（对应 selection_*）
+src/js/macros.js          宏（对应 macro_*）
+src/js/audio.js           Web Audio 播放引擎
+src/js/nbs.js             .nbs / .nbp 读写
+src/js/midi.js            MIDI 解析与导入
+src/js/mididevice.js      Web MIDI 输入设备（实时弹奏 / 录入）
+src/js/cbnd.js            cbnote 的 .cbnd / 指令 txt 导入
+src/js/render.js          音频离线渲染导出（WAV）
+src/js/schematic.js       schematic / 数据包导出（对应 export_schematic_*）
+src/js/ui.js              控件库、菜单、消息框
+src/js/editor.js          主编辑器绘制与交互（对应 control_draw）
+src/js/dialogs.js         菜单动作与各类窗口
+src/js/main.js            启动与首选项持久化
+src/assets/atlas          从原项目提取的精灵图集（运行时使用）
+src/assets/sounds         原版音色（运行时使用）
 ```
 
-> 图集 `assets/atlas/` 由原项目 `sprites/` 下的逐帧 PNG 打包而成，已是运行时所需的最终形态，因此原始逐帧素材未纳入本仓库。需要重新生成图集时，从 [OpenNBS/NoteBlockStudio](https://github.com/OpenNBS/NoteBlockStudio) 取 `sprites/` 即可。
+> 图集 `src/assets/atlas/` 由原项目 `sprites/` 下的逐帧 PNG 打包而成，已是运行时所需的最终形态，因此原始逐帧素材未纳入本仓库。需要重新生成图集时，从 [OpenNBS/NoteBlockStudio](https://github.com/OpenNBS/NoteBlockStudio) 取 `sprites/` 即可。
 
-> 图标来自原项目 `datafiles/Data/icon.ico`，未做重绘。`favicon.ico` 里打包了 16/32/48/64/128/256 多档，浏览器自行挑选；同时提供 180px 与 512px 的 PNG 供 iOS 主屏和 PWA 使用。
+> 图标来自原项目 `datafiles/Data/icon.ico`，未做重绘。`favicon.ico` 里打包了 16/32/48/64/128/256 多档，浏览器自行挑选；同时提供 180px 与 512px 的 PNG 供 iOS 主屏和 PWA 使用。单文件版把图标以 data URI 内联，所以下载到本地打开也不会丢图标。
 
 ## 已实现
 
@@ -389,13 +411,16 @@ theme 3 用 `spr_layericons_f` 双层（基帧 + accent 上色层）。
 
 ## 单文件版是怎么做的
 
-`dist/noteblockstudio.min.html` 是源码版的完整内联版本：
+根目录的 `index.html` 是 `src/` 的完整内联版本：
 
 - 所有 JS / CSS 合并进一个 `<script>` / `<style>`
-- `assets/` 下的图集与音色（88 个文件）先用 **LZ77** 压缩，再用 **base91** 编码成纯文本嵌入
+- `src/assets/` 下的图集与音色（88 个文件）先用 **LZ77** 压缩，再用 **base91** 编码成纯文本嵌入
 - 页面内置 LZ77 解码器与 base91 解码器，并在 `fetch` 层做了内存文件系统垫片，所以 `assets/...` 路径照常可用、无需改动业务代码
 - favicon 以 data URI 内联，因此「下载到本地双击打开」时标签页图标也不会丢
 - base91 字母表刻意排除了 `<`，因此数据块可以放进裸 `<script>` 而不需要任何转义
+
+它也彻底消除了那 114 个请求：页面只下一个文件，素材全部从内存读取。
+冷缓存首次打开因此从约 132 秒降到约 6 秒。
 
 原始素材 425 KB → LZ77 后 380 KB（89.3%）→ base91 后 466 K 字符；整个单文件 716 KB。
 
