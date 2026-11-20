@@ -286,11 +286,65 @@ function layoutResize() {
 }
 
 /* ---------------------------------------------------------------- 播放推进 */
+/* 播放位置的时间基准。
+ *
+ * 为什么不用「S.marker_pos += tempo * dt」：
+ *   窗口最小化/切到后台时，rAF 完全停摆，浏览器把 setInterval 降频到约 1 次/秒，
+ *   而 startLoop 里 dt 上限是 0.5s。于是每 1 秒真实时间只推进 0.5 秒播放 ——
+ *   最小化后播放速度正好减半（用户听到的就是「变慢」）。
+ *   上限不能简单调大：长时间挂起后恢复时，一次 tick 会把几十秒一次性跳过。
+ *
+ * 解法：用 Web Audio 的 ctx.currentTime 作时间基准。
+ *   这个时钟由音频硬件驱动，后台不降频、不受 rAF/定时器影响。
+ *   起播时记下「锚点 = (音频时钟, 曲内位置)」，之后任意时刻：
+ *       位置 = 锚点位置 + (音频时钟 - 锚点时钟) * tempo
+ *   无论回调来得多稀疏，位置都严格跟着真实时间走。
+ *
+ * 需要重建锚点的时机：变速、跳转、循环、起播/暂停。
+ */
+function setPlayAnchor(pos) {
+  if (!AU.ctx) return;
+  S.play_anchor_pos = pos;
+  S.play_anchor_time = AU.ctx.currentTime;
+  S.play_anchor_tempo = S.tempo;
+  S.play_anchor_expected = pos;   // 上一帧算出的位置，用于检测外部改动
+}
+
+/* 按音频时钟推进播放位置。返回本帧应推进到的位置。 */
+function advanceByAudioClock() {
+  // 没有音频上下文（未初始化/被挂起）时退回 dt 累加，保证仍能播放
+  if (!AU.ctx || AU.ctx.state !== 'running') {
+    S.marker_pos += S.tempo * G.dt;
+    return S.marker_pos;
+  }
+  /* 检测「位置被外部改过」：用户拖动播放标记、点时间轴跳转、
+     按 Home/End 等都会直接写 S.marker_pos。这种情况必须以新位置重锚，
+     否则上面算出的位置会立刻把用户的拖动结果覆盖掉。
+     用 0.5 格的容差，避免浮点噪声误判。 */
+  const drift = Math.abs(S.marker_pos - (S.play_anchor_expected === undefined ? S.marker_pos : S.play_anchor_expected));
+  if (typeof S.play_anchor_time !== 'number' || S.play_anchor_tempo !== S.tempo || drift > 0.5) {
+    setPlayAnchor(S.marker_pos);
+    // 位置被外部挪动（拖动标记/点时间轴/按 Home），排期游标要跟过去，
+    // 否则 scheduleAhead 会从旧位置继续补排，把已经过去的列又播一遍
+    S.sched_col = floor(S.marker_pos);
+  }
+  const el = Math.max(0, AU.ctx.currentTime - S.play_anchor_time);
+  S.marker_pos = S.play_anchor_pos + el * S.tempo;
+  S.play_anchor_expected = S.marker_pos;
+  return S.marker_pos;
+}
+
 function handlePlayback(dt) {
   const totalcols = S.totalcols;
   if (S.playing === 1 || S.forward !== 0) {
-    if (S.playing === 1) S.marker_pos += S.tempo * dt;
-    if (S.forward !== 0) S.marker_pos += S.tempo * dt * (S.forward - (S.forward < 0 && S.playing === 1 ? 1 : 0));
+    if (S.playing === 1) {
+      advanceByAudioClock();
+    }
+    if (S.forward !== 0) {
+      // 快进/快退是「按住生效」，本来就该跟手，用 dt 累加即可
+      S.marker_pos += S.tempo * dt * (S.forward - (S.forward < 0 && S.playing === 1 ? 1 : 0));
+      if (S.playing === 1) setPlayAnchor(S.marker_pos);   // 手动挪过位置，重锚
+    }
 
     // 节拍器（对照 control_draw.gml:1047-1064）
     // 注意：源码用的是 play_sound(soundmetronome...)，【不是】界面音效，
@@ -314,6 +368,8 @@ function handlePlayback(dt) {
       S.timestoloop--;
       S.starta = S.loopstart;
       S.marker_pos = S.starta;
+      setPlayAnchor(S.marker_pos);   // 跳回循环起点，重建音频锚点
+      S.sched_col = floor(S.marker_pos);   // 排期游标跟着回到循环起点
       S.metronome_played = -1;
       if (S.sb_val) S.sb_val[0] = S.starta;
       if (S.loopmax !== 0 && S.timestoloop < 0) {
@@ -347,11 +403,87 @@ function handlePlayback(dt) {
       }
     }
   }
-  S.marker_pos = median(0, S.marker_pos, S.enda + totalcols);
+  const clamped = median(0, S.marker_pos, S.enda + totalcols);
+  /* 位置被夹取（跑到曲尾/曲首外）说明和锚点已经脱节，重锚一次，
+     否则下一帧 advanceByAudioClock 会算出同样的越界值，一直空转。 */
+  if (clamped !== S.marker_pos) setPlayAnchor(clamped);
+  S.marker_pos = clamped;
 }
 
-/* 播放当前列（floor(marker_pos) 变化时） */
-function playColumnRange(start, end) {
+/* ---------------------------------------------------------------- 播放排期
+ *
+ * 只锚定位置还不够：窗口最小化后浏览器把定时器降到 1 次/秒，
+ * 一次回调就跨过 10 列（tempo=10 时），「标记走到哪列就播哪列」的写法
+ * 只能播到最后一列，中间 9 列的音频被整段丢掉 —— 听感上就是音符缺失、
+ * 节奏打嗝。
+ *
+ * 所以改成 Web Audio 的标准做法：**提前排期**。
+ *   把未来一小段时间内要响的音符，按精确时刻 src.start(when) 交给音频引擎。
+ *   之后无论 JS 回调来得多稀疏，音符都在正确的时刻发声，一个不丢。
+ *
+ * 前瞻窗口是动态的：
+ *   前台 rAF 每帧都来（~16ms），窗口 0.25s 足够，延迟低；
+ *   检测到回调被降频（上一帧间隔 > 200ms）后拉到 1.5s，
+ *   保证下一次回调到来之前，这段时间的音符已经全部排好。
+ */
+const LOOKAHEAD_FG = 0.25;
+const LOOKAHEAD_BG = 1.5;
+
+/* 把 [从 sched_col 开始、落在前瞻窗口内] 的列排期出去。
+   返回排期到的列号（不含）。 */
+function scheduleAhead() {
+  if (!AU.ctx || AU.ctx.state !== 'running') return S.sched_col;
+  if (S.playing !== 1 || S.forward !== 0) return S.sched_col;
+  if (typeof S.play_anchor_time !== 'number') return S.sched_col;
+
+  const now = AU.ctx.currentTime;
+  const gap = S.last_tick_gap || 0;
+  const lookahead = gap > 0.2 ? LOOKAHEAD_BG : LOOKAHEAD_FG;
+  const horizon = now + lookahead;
+  const tempo = Math.max(0.25, S.tempo);
+
+  const cur = floor(S.play_anchor_pos + (now - S.play_anchor_time) * tempo);
+  /* 游标落后于当前位置时【不要跳过中间的列】——
+     那些列的音符还没发过声。最小化期间定时器可能几秒才来一次，
+     如果在这里直接 S.sched_col = cur，中间几百列就被整段丢掉了
+     （实测最小化 4 秒漏掉 22 列）。
+     正确做法是把它们以「立即发声」的方式补上：when 会被 clamp 到 now，
+     声音会挤在一起但不会丢，听感上是从后台切回来时把落下的音补齐。 */
+  if (S.sched_col < cur - 1) {
+    // 落后太多（切回前台时可能积压上百列）就只补最近的一小段，避免一次性爆音
+    const MAX_CATCHUP = 200;
+    if (cur - S.sched_col > MAX_CATCHUP) S.sched_col = cur - MAX_CATCHUP;
+  }
+
+  let guard = 0;
+  while (S.sched_col <= S.enda && guard++ < 512) {
+    const col = S.sched_col;
+    const when = S.play_anchor_time + (col - S.play_anchor_pos) / tempo;
+    if (when > horizon) break;
+
+    /* Tempo Changer 会改变播放速度，提前排期会让变速提前生效。
+       遇到这种列就不提前排了，留给即时触发处理（见 draw 里的分支）。 */
+    let hasTempo = false;
+    if (colamount[col] > 0) {
+      for (let b = colfirst[col]; b <= collast[col]; b++) {
+        if (!gExists(col, b)) continue;
+        const ins = INSTRUMENTS[gIns(col, b)];
+        if (ins && ins.name === 'Tempo Changer') { hasTempo = true; break; }
+      }
+    }
+    if (hasTempo) break;
+
+    playColumnRange(col, col, Math.max(when, now));
+    S.sched_col = col + 1;
+  }
+  return S.sched_col;
+}
+
+/* 播放当前列（floor(marker_pos) 变化时）。
+   audioWhen 可选：该列在 Web Audio 时间轴上的绝对时刻（秒）。
+   播放器做「提前排期」时会传它，让音频引擎按精确时刻发声；
+   试听/拖动/录制等即时场景不传，立即发声。 */
+function playColumnRange(start, end, audioWhen) {
   for (let xx = start; xx <= end; xx++) {
     if (xx < 0) continue;
     if (colamount[xx] > 0) {
@@ -374,7 +506,7 @@ function playColumnRange(start, end) {
         }
         if (a) {
           const ins = INSTRUMENTS[gIns(xx, b)];
-          if (ins && ins.loaded) playSound(ins, gKey(xx, b), c, d, e);
+          if (ins && ins.loaded) playSound(ins, gKey(xx, b), c, d, e, audioWhen);
           if (ins && ins.name === 'Tempo Changer') S.tempo = floor(Math.abs(e)) / 15;
           if (ins && ins.press) S.key_played[gKey(xx, b)] = G.time;
           S.grid.played[gidx(xx, b)] = G.time;
@@ -399,8 +531,15 @@ function togglePlaying(cols) {
     }
     S.marker_prevpos = S.marker_pos;
     S.metronome_played = -1;
+    // 起播时以音频时钟为基准重新锚定，后台运行也不会跑偏
+    if (AU.ctx && AU.ctx.state === 'suspended') AU.ctx.resume();
+    setPlayAnchor(S.marker_pos);
+    /* 排期游标从当前列开始。当前列立刻排（不提前），
+       否则起播瞬间会听到一小段被压缩的"预热"。 */
+    S.sched_col = floor(S.marker_pos);
     const xx = floor(S.marker_pos);
     if (xx <= S.enda) playColumnRange(xx, xx);
+    S.sched_col = xx + 1;
   } else {
     S.timestoloop = S.loopmax;
   }
@@ -755,14 +894,19 @@ function drawEditor(dt) {
   setColor(C.grid);
   fillRect(gx, gy, totalcols * 32, totalrows * 32);
 
-  // 播放列触发
-  if (floor(S.marker_pos) !== floor(S.marker_prevpos) && floor(S.marker_pos) <= S.enda &&
+  /* 播放列触发。
+     正常播放走「提前排期」（scheduleAhead），由音频时钟决定发声时刻，
+     后台降频也不会漏音；非播放状态（试听、拖动标记、快进）仍走即时触发。 */
+  if (S.playing === 1 && S.forward === 0 && !S.marker_end && S.window !== W_DRAGMARKER) {
+    scheduleAhead();
+  } else if (floor(S.marker_pos) !== floor(S.marker_prevpos) && floor(S.marker_pos) <= S.enda &&
     (floor(S.marker_pos) !== S.section_end || S.window === W_DRAGMARKER || S.forward !== 0 || S.marker_end === 0 || S.marker_prevpos >= S.section_end)) {
     const diff = floor(S.marker_pos) - floor(S.marker_prevpos);
     let start;
     if (!S.playing || diff < 0 || diff > 3) start = floor(S.marker_pos);
     else start = floor(S.marker_prevpos) + 1;
     playColumnRange(start, floor(S.marker_pos));
+    S.sched_col = floor(S.marker_pos) + 1;
   }
   if (S.tempo < 0.25) S.tempo = 0.25;
 
@@ -1948,6 +2092,24 @@ function drawNoteChart(x, y, key, accidental) {
 /* ---------------------------------------------------------------- 辅助 */
 function setMsg(s) { S.msgtext = s; S.msgtime = G.time; }
 function drawMsg() {
+  /* 导出音频期间显示常驻进度条。
+     setMsg 的消息 4 秒就淡出，而渲染一首 2 分钟的歌要几十秒 ——
+     只靠 setMsg 用户会以为程序没反应。这里渲染期间一直显示进度与百分比。 */
+  if (S.render_progress !== undefined && S.render_progress >= 0) {
+    const p = clamp(S.render_progress, 0, 1);
+    const label = S.render_msg || '正在渲染音频...';
+    setColor(C.dark ? 'rgba(50,50,50,0.95)' : 'rgba(255,255,255,0.95)');
+    const w = Math.max(260, textWidth(label) + 40);
+    roundRect(8, S.rh - 74, 8 + w, S.rh - 28, 4, true);
+    setColor(C.text);
+    text(18, S.rh - 69, label + '  ' + Math.round(p * 100) + '%');
+    // 进度条
+    setColor(C.dark ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.12)');
+    fillRect(18, S.rh - 46, w - 36, 6);
+    setColor(T.accent[0]);
+    fillRect(18, S.rh - 46, (w - 36) * p, 6);
+    return;
+  }
   if (!S.msgtext || G.time - S.msgtime > 4) return;
   const a = clamp(4 - (G.time - S.msgtime), 0, 1);
   setAlpha(a);

@@ -71,8 +71,11 @@ async function decodeSoundFile(file) {
   return await AU.ctx.decodeAudioData(ab);
 }
 
-/* 与 GML play_sound(ins, key, vol, pan, pit) 等价 */
-function playSound(ins, key, vol, pan, pit) {
+/* 与 GML play_sound(ins, key, vol, pan, pit) 等价。
+   when 是可选参数：Web Audio 时间轴上的绝对时刻（秒）。
+   播放器用它做「提前排期」—— 把音符安排在精确的未来时刻发声，
+   这样即使 JS 回调被后台降频，音符也不会迟到或漏掉。 */
+function playSound(ins, key, vol, pan, pit, when) {
   if (!ins || !ins.loaded || !ins.buffer || !AU.ctx) return 0;
   if (AU.ctx.state === 'suspended') AU.ctx.resume();
   const shift = key + (ins.key + (pit || 0) / 100 - 78);
@@ -89,7 +92,10 @@ function playSound(ins, key, vol, pan, pit) {
   // GML: audio_emitter_position(emitter, pan, 0, 0)，pan 0..200（100 为中央）
   p.pan.value = clamp((pan - 100) / 100, -1, 1);
   src.connect(g); g.connect(p); p.connect(AU.master);
-  src.start();
+  /* when 必须是 ctx 时间轴上的绝对时刻；早于当下就立即播（start(0) 的语义是「马上」）。
+     留 10ms 余量，避免边界上被判定为过去时刻。 */
+  const t = (typeof when === 'number' && isFinite(when)) ? Math.max(when, AU.ctx.currentTime) : 0;
+  if (t > 0) src.start(t); else src.start();
 
   const voice = { src, g, ins, key };
   AU.voices.push(voice);

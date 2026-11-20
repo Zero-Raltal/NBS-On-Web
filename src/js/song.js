@@ -212,6 +212,15 @@ function reset() {
   S.arraylength = 0; S.arrayheight = 0;
   S.totalblocks = 0; S.block_outside = 0; S.block_custom = 0; S.block_pitched = 0;
   S.marker_pos = 0; S.marker_prevpos = 0; S.playing = 0; S.record = 0;
+  /* 播放排期状态（见 editor.js 的 scheduleAhead）。
+     sched_col 必须初始化为数字：undefined <= S.enda 恒为 false，
+     会让排期循环一次都不进入，表现为「播放完全没声音」。 */
+  S.sched_col = 0;
+  S.play_anchor_pos = 0;
+  S.play_anchor_time = undefined;
+  S.play_anchor_tempo = undefined;
+  S.play_anchor_expected = 0;
+  S.last_tick_gap = 0;
   S.section_exists = 0; S.section_start = 0; S.section_end = 0;
   S.song_name = ''; S.song_author = ''; S.song_orauthor = ''; S.song_desc = '';
   S.work_mins = 0; S.work_left = 0; S.work_right = 0; S.work_add = 0; S.work_remove = 0;

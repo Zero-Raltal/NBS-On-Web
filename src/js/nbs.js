@@ -299,11 +299,17 @@ function readPattern(buf) {
 function downloadBytes(bytes, name, mime) {
   const blob = new Blob([bytes], { type: mime || 'application/octet-stream' });
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
+  const url = URL.createObjectURL(blob);
+  a.href = url;
   a.download = name;
   document.body.appendChild(a);
   a.click();
-  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  /* 撤销时机很关键：Chrome 的下载是【异步】开始的，click() 返回时
+     浏览器可能还没把 blob 读完。原来 1 秒后就 revoke，导出 WAV 这种
+     几 MB～几十 MB 的文件会在下载刚起步时被中断（CDP 里表现为
+     downloadProgress: canceled，用户看到的就是「点了导出没反应」）。
+     改成充裕的延迟，让下载把数据取完再释放。 */
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 60000);
 }
 
 function pickFile(accept, cb) {

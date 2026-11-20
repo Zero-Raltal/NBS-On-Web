@@ -1624,12 +1624,9 @@ function drawTempoTapper() {
 function openMidiDevice() {
   S.playing = 0;
   S.window = W_MIDIDEVICES;
-  MIDI_DEV.initTried = false;
-  // 进入窗口就请求一次权限（用户手势内，Chrome 才允许弹权限框）
-  midiInit(onMidiNote).then((ok) => {
-    MIDI_DEV.initTried = true;
-    if (!ok) MIDI_DEV.enabled = false;
-  });
+  // 进入窗口就请求一次权限（用户手势内，Chrome 才允许弹权限框）。
+  // 状态机由 mididevice.js 维护，带超时兜底，不会卡在「正在请求」。
+  if (MIDI_DEV.state === 'idle') midiInit(onMidiNote);
 }
 
 /* 收到 MIDI 音符：
@@ -1658,17 +1655,25 @@ function drawMidiDevices() {
   let y = f.y1 + 48;
   const lh = 22;
 
-  if (!MIDI_DEV.initTried) {
+  if (MIDI_DEV.state === 'requesting' || MIDI_DEV.state === 'idle') {
     setColor(C.textDim);
-    text(f.x1 + 16, y, '正在请求 MIDI 权限...');
+    text(f.x1 + 16, y, '正在请求 MIDI 权限...'); y += lh + 4;
+    setFont(FONT.small());
+    text(f.x1 + 16, y, '浏览器会弹出权限提示，请点「允许」。');
+    text(f.x1 + 16, y + 18, '若没有看到提示，请检查地址栏左侧的权限图标。');
+    setFont(FONT.main());
   } else if (!MIDI_DEV.enabled) {
-    // 不支持或拒绝授权：把具体原因分行显示
+    // 失败：把具体原因分行显示，并给一个「重试」按钮
     setColor(C.text);
     const lines = (MIDI_DEV.lastError || '无法启用 MIDI 输入。').split('\n');
     for (const ln of lines) { text(f.x1 + 16, y, ln); y += lh; }
     y += 6;
     setColor(C.textDim);
     text(f.x1 + 16, y, '你仍可以用「从 MIDI 文件导入」把 .mid 文件转换成音符。');
+    setFont(FONT.main());
+    if (button2(f.x2 - 160, f.y2 - 34, 76, '重试')) {
+      midiRetry(onMidiNote);
+    }
   } else {
     // 已启用：列出输入端口
     setColor(C.textDim);
