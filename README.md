@@ -7,18 +7,18 @@
 
 ## 在线使用
 
-直接用浏览器打开仓库根目录的单文件版即可，无需服务器、无需安装：
+直接用浏览器打开就能用，无需服务器、无需安装：
 
-- **<https://zero-raltal.github.io/NBS-On-Web/>** —— 单文件压缩版（`.min.html` 内容，HTML/CSS/JS 全部内联并压缩，所有素材以 LZ77 + base91 编码内嵌，打开即用）
+- **<https://zero-raltal.github.io/NBS-On-Web/>** —— 源码版（浏览器按需加载 `js/*.js` 与 `assets/`）
+- **<https://zero-raltal.github.io/NBS-On-Web/dist/noteblockstudio.min.html>** —— 单文件压缩版（HTML/CSS/JS 全部内联并压缩，所有素材以 LZ77 + base91 编码内嵌，可离线、可单文件分发）
 
-也可以把根目录的 `index.html` 下载到本地双击打开，功能完全一致。
+单文件版也可以下载到本地双击打开，功能完全一致。
 
 ## 从源码运行
 
 浏览器出于安全限制不能直接读本地文件，需要用一个静态服务器打开：
 
 ```bash
-cd src
 python -m http.server 8123
 # 然后访问 http://localhost:8123/index.html
 ```
@@ -27,33 +27,43 @@ python -m http.server 8123
 
 ## 目录
 
+源码直接放在仓库根目录，`index.html` 就是源码版入口：
+
 ```
-index.html              单文件压缩版（全部内联，直接打开即用）
-src/index.html          开发版入口（按需加载 src/js/*.js）
-src/css/style.css       样式
-src/js/core.js          画布/输入/文本/图元
-src/js/theme.js         主题与配色（经典 + 暗黑 + 复古 + Fluent）
-src/js/assets.js        图集与音色载入
-src/js/song.js          歌曲数据模型与增删改（对应 add_block 等）
-src/js/history.js       撤销栈
-src/js/selection.js     选区（对应 selection_*）
-src/js/macros.js        宏（对应 macro_*）
-src/js/audio.js         Web Audio 播放引擎
-src/js/nbs.js           .nbs / .nbp 读写
-src/js/midi.js          MIDI 解析与导入
-src/js/mididevice.js    Web MIDI 输入设备（实时弹奏 / 录入）
-src/js/cbnd.js          cbnote 的 .cbnd / 指令 txt 导入
-src/js/render.js        音频离线渲染导出（WAV）
-src/js/schematic.js     schematic / 数据包导出（对应 export_schematic_*）
-src/js/ui.js            控件库、菜单、消息框
-src/js/editor.js        主编辑器绘制与交互（对应 control_draw）
-src/js/dialogs.js       菜单动作与各类窗口
-src/js/main.js          启动与首选项持久化
-src/assets/atlas        从原项目提取的精灵图集（运行时使用）
-src/assets/sounds       原版音色（运行时使用）
+index.html                源码版入口（按需加载 js/*.js、css/style.css）
+favicon.ico               图标（取自原版 note block 图标，多尺寸）
+apple-touch-icon.png      iOS 主屏图标
+icon-512.png              PWA / 大尺寸图标
+manifest.webmanifest      PWA 清单
+dist/noteblockstudio.html      单文件可读版（调试用）
+dist/noteblockstudio.min.html  单文件压缩版（分发用）
+css/style.css             样式
+js/core.js                画布/输入/文本/图元
+js/touch.js               触屏与竖屏适配（长按=右键、拖动平移、抽屉）
+js/theme.js               主题与配色（经典 + 暗黑 + 复古 + Fluent）
+js/assets.js              图集与音色载入
+js/song.js                歌曲数据模型与增删改（对应 add_block 等）
+js/history.js             撤销栈
+js/selection.js           选区（对应 selection_*）
+js/macros.js              宏（对应 macro_*）
+js/audio.js               Web Audio 播放引擎
+js/nbs.js                 .nbs / .nbp 读写
+js/midi.js                MIDI 解析与导入
+js/mididevice.js          Web MIDI 输入设备（实时弹奏 / 录入）
+js/cbnd.js                cbnote 的 .cbnd / 指令 txt 导入
+js/render.js              音频离线渲染导出（WAV）
+js/schematic.js           schematic / 数据包导出（对应 export_schematic_*）
+js/ui.js                  控件库、菜单、消息框
+js/editor.js              主编辑器绘制与交互（对应 control_draw）
+js/dialogs.js             菜单动作与各类窗口
+js/main.js                启动与首选项持久化
+assets/atlas              从原项目提取的精灵图集（运行时使用）
+assets/sounds             原版音色（运行时使用）
 ```
 
-> 图集 `src/assets/atlas/` 由原项目 `sprites/` 下的逐帧 PNG 打包而成，已是运行时所需的最终形态，因此原始逐帧素材未纳入本仓库。需要重新生成图集时，从 [OpenNBS/NoteBlockStudio](https://github.com/OpenNBS/NoteBlockStudio) 取 `sprites/` 即可。
+> 图集 `assets/atlas/` 由原项目 `sprites/` 下的逐帧 PNG 打包而成，已是运行时所需的最终形态，因此原始逐帧素材未纳入本仓库。需要重新生成图集时，从 [OpenNBS/NoteBlockStudio](https://github.com/OpenNBS/NoteBlockStudio) 取 `sprites/` 即可。
+
+> 图标来自原项目 `datafiles/Data/icon.ico`，未做重绘。`favicon.ico` 里打包了 16/32/48/64/128/256 多档，浏览器自行挑选；同时提供 180px 与 512px 的 PNG 供 iOS 主屏和 PWA 使用。
 
 ## 已实现
 
@@ -96,7 +106,7 @@ src/assets/sounds       原版音色（运行时使用）
 
 **持久化**：首选项全部设置项（含界面缩放）保存到浏览器本地；歌曲自动恢复
 
-**MIDI 导入规则**（对齐 `import_midi.gml` + `midi_instruments.gml` 映射表，见 `src/js/midi-map.js`）：按 **MIDI 通道** 分组、每通道占据「最大同时发声数」高度的连续层带、`一格 = (division/4)/(precision+1)` 个 tick、
+**MIDI 导入规则**（对齐 `import_midi.gml` + `midi_instruments.gml` 映射表，见 `js/midi-map.js`）：按 **MIDI 通道** 分组、每通道占据「最大同时发声数」高度的连续层带、`一格 = (division/4)/(precision+1)` 个 tick、
 音高 = note − 21、速度 = bpm×(precision+1)/15（保留两位小数）、打击乐按 GM 鼓组映射到内置音色、可按音色命名图层
 
 ## 交互细节（已对齐原版）
@@ -275,9 +285,12 @@ cbnote key   = 本编辑器 key + 9
 指针处理器**无条件安装** —— 漏装的风险（长按/拖动全失效且用户无法自救）
 远大于多装（对 `pointerType === 'mouse'` 立刻返回）。
 
-触屏模态下有个缩放下限 `TOUCH_MIN_SCALE = 1.3`：图标 25 → 32.5 CSS 像素，
-接近可点面积下限。绘制变换与输入换算共用 `touchEffScale()`，
-否则"画到哪儿就点不到哪儿"。
+**触屏模态不改动全局缩放。** 早期版本为了放大可点面积，在触屏模态下把有效缩放
+强制抬到 1.3（`TOUCH_MIN_SCALE`），结果「一切到触屏模式整个页面突然放大」——
+用户设的 100% 被静默改成 130%，而用户既不知道发生了什么、也不好从别处调回来。
+缩放是用户的偏好，不该被改写，所以这个下限已经移除。
+触控目标偏小的问题改由各控件自己的尺寸解决（抽屉按钮 24~26 逻辑像素、琴键 39）。
+绘制变换与输入换算仍然共用 `touchEffScale()`，否则"画到哪儿就点不到哪儿"。
 
 ### 长按 = 右键
 
@@ -327,6 +340,48 @@ cbnote key   = 本编辑器 key + 9
   `marker_follow` 默认就是 1，每帧都会把 `starta` 强行设成标记居中值。
   平移期间临时关掉 `marker_follow`，松手恢复。
 
+### 抽屉是浮层，必须看到真实输入
+
+`drawerOpen()` 让 `blocked` 为真，而 `editorFrame` 在 `blocked` 时会先清空
+`G.mb / G.mbp / G.mbr`，再调用 `drawEditor`。抽屉在 `drawEditor` 之后才绘制，
+于是它内部所有读 `G.mb` 的控件（琴键、按钮、名字输入框）**永远收不到按下** ——
+这正是「抽屉里的钢琴点不动、音轨按钮失效」的原因。
+
+修法是：抽屉绘制期间把 `UI.rawMb / rawMbp / rawMbr`（清零前的快照）换进 `G`，
+画完再换回去。同时给 `editorFrame` 补上 `UI.rawMb`（原先只存了 `rawMbr`、`rawMbp`）。
+
+另外注意标签条那一层：写成裸的 `if (G.mbr[0])` 而不做命中测试，
+同一次抬手会把循环里**每一个**标签都执行一遍，最后留下最后一个 ——
+表现就是「点哪个标签都跳到属性抽屉」。
+
+### 音轨（图层）抽屉复用桌面版的图标
+
+抽屉里的七个按钮直接调桌面版同一个 `layerIcon()`，它内部已按主题分派：
+theme 0/1 用 `spr_frame4` 底板 + `spr_layericons`；theme 2 同款但图标取白；
+theme 3 用 `spr_layericons_f` 双层（基帧 + accent 上色层）。
+所以抽屉按钮和桌面版图层面板长得一模一样，也自动跟着换主题，不需要另画一套。
+
+三个曾经失效的功能（都已按桌面版语义对齐）：
+
+- **锁定 / 独奏不是两个独立布尔**，而是同一个字段 `S.layerlock` 的三态：
+  `0` 正常、`1` 静音、`2` 独奏，且独奏还要同时维护 `S.solostr`（形如 `|3|7|`）。
+  写成两个独立开关会导致「点了独奏，该层反而被静音」。
+- **新建层用 `addLayer(layer)`**，不是 `addLayer(layer + 1)` —— `addLayer` 自己会把
+  新层插在 index 位置并后移原有内容。
+- 删除 / 新建 / 上下移之前都要 `S.playing = 0`，否则播放中改结构会让排期游标
+  指向已不存在的层。
+
+### 八度箭头的跨度
+
+`S.startkey` 是**白键索引**（0 = A0），不是半音数 —— 色度键号是 `startkey + sharpkeys`。
+直接把半音增量加到 `startkey` 上，一次 +6 会变成跨 7 个白键 ≈ 11 个半音，
+实测「按一下从 C4 跳到 B4」，几乎整个八度，这就是跨度太大的原因。
+
+现在先在**半音域**算出目标键号，再用 `chromaToWhite()` 换算回白键索引；
+步长 `OCT_STEP = 6`（三全音），目标落在黑键时向下吸附到相邻白键
+（键盘无法从黑键起画，所以相邻两次步进会在 5~7 半音之间交替，平均 6）。
+抽屉底部还会显示当前实际音域（如 `C4 ~ D5`），让"跳到哪了"一眼可见。
+
 ## 已在游戏内验证
 
 - **schematic / 结构导出**：已在 Minecraft 中实际加载测试，音符方块与红石布线均可正常播放。
@@ -334,11 +389,12 @@ cbnote key   = 本编辑器 key + 9
 
 ## 单文件版是怎么做的
 
-根目录的 `index.html` 是 `src/` 的完整内联版本：
+`dist/noteblockstudio.min.html` 是源码版的完整内联版本：
 
 - 所有 JS / CSS 合并进一个 `<script>` / `<style>`
-- `src/assets/` 下的图集与音色（88 个文件）先用 **LZ77** 压缩，再用 **base91** 编码成纯文本嵌入
+- `assets/` 下的图集与音色（88 个文件）先用 **LZ77** 压缩，再用 **base91** 编码成纯文本嵌入
 - 页面内置 LZ77 解码器与 base91 解码器，并在 `fetch` 层做了内存文件系统垫片，所以 `assets/...` 路径照常可用、无需改动业务代码
+- favicon 以 data URI 内联，因此「下载到本地双击打开」时标签页图标也不会丢
 - base91 字母表刻意排除了 `<`，因此数据块可以放进裸 `<script>` 而不需要任何转义
 
 原始素材 425 KB → LZ77 后 380 KB（89.3%）→ base91 后 466 K 字符；整个单文件 716 KB。

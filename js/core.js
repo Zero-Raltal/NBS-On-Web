@@ -335,9 +335,9 @@ function initInput() {
 
   const toLogical = (e) => {
     const r = cv.getBoundingClientRect();
-    /* 触屏模态下有个缩放下限（见 touch.js 的 TOUCH_MIN_SCALE），
-       它可能高于 S.window_scale，所以坐标换算必须走同一个函数，
-       否则点下去的位置和画出来的位置会整体错位。 */
+    /* 触屏状态下坐标换算统一走 touchEffScale()。
+       早期有个缩放下限（TOUCH_MIN_SCALE），现已移除 —— 缩放完全跟随用户设置。
+       但换算仍必须和绘制用同一个函数，否则会整体错位。 */
     const sc = (typeof touchEffScale === 'function') ? touchEffScale() : S.window_scale;
     return [(e.clientX - r.left) / sc, (e.clientY - r.top) / sc];
   };
@@ -518,8 +518,9 @@ function startLoop(cb) {
 function resizeCanvas() {
   const cv = G.canvas;
   G.dpr = window.devicePixelRatio || 1;
-  /* 有效缩放：触屏模态下不会低于 TOUCH_MIN_SCALE（保证按钮可点面积）。
-     绘制变换和输入换算必须用【同一个】值，否则画到哪儿就点不到哪儿。 */
+  /* 有效缩放 = 用户设置的缩放。触屏模态【不】做任何放大
+     （早期版本会强制抬到 1.3，导致"切到触屏模式页面突然放大"，已移除）。
+     绘制变换和输入换算必须用同一个值，否则画到哪儿就点不到哪儿。 */
   const eff = (typeof touchEffScale === 'function') ? touchEffScale() : S.window_scale;
   S.eff_scale = eff;
   const cw = cv.clientWidth, ch = cv.clientHeight;

@@ -56,18 +56,17 @@ const TOUCH = {
   pan_acc_y: 0,        // 纵向同上
 };
 
-/* 触屏模态下的最小缩放。
-   图标/按钮是按 25 逻辑像素画的，手机上若 1:1 渲染就只有 25 CSS 像素，
-   远小于可点面积的下限（约 44）。把整体放大到 1.3 倍后：
-     25 × 1.3 = 32.5 CSS 像素的图标、32 × 1.3 = 41.6 的网格单元，
-   接近可用下限，同时逻辑宽度不至于小到看不见几列。
-   只作为【下限】，用户手动调大的缩放依然生效。 */
-const TOUCH_MIN_SCALE = 1.3;
-
+/* 【为什么触屏模态不改动全局缩放】
+   早期版本在这里维护一个 TOUCH_MIN_SCALE 下限：
+       return Math.max(base, TOUCH_MIN_SCALE);   // 1.3
+   后果是【一切到触屏模式，整个页面突然放大】—— 用户设的 100% 被悄悄改成 130%，
+   这是一种"看不见的控制"：用户既不知道发生了什么，也不好从别处调回来。
+   缩放是用户的偏好，不该被静默改写，所以这里直接返回用户设置的值。
+   触控目标偏小的问题改由【各控件自己的尺寸】解决
+   （抽屉按钮 24~26、琴键保持 39、滚动条 16→不变），而不是劫持全局缩放。 */
 function touchEffScale() {
   const base = (typeof S.window_scale === 'number' && S.window_scale > 0) ? S.window_scale : 1;
-  if (!TOUCH.mode) return base;
-  return Math.max(base, TOUCH_MIN_SCALE);
+  return base;
 }
 
 /* 触摸期间以及刚结束的一小段时间里，屏蔽浏览器补发的兼容鼠标事件，
