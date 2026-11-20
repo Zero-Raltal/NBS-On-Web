@@ -41,6 +41,7 @@ src/js/macros.js        宏（对应 macro_*）
 src/js/audio.js         Web Audio 播放引擎
 src/js/nbs.js           .nbs / .nbp 读写
 src/js/midi.js          MIDI 解析与导入
+src/js/cbnd.js          cbnote 的 .cbnd / 指令 txt 导入
 src/js/schematic.js     schematic / 数据包导出（对应 export_schematic_*）
 src/js/ui.js            控件库、菜单、消息框
 src/js/editor.js        主编辑器绘制与交互（对应 control_draw）
@@ -81,6 +82,8 @@ src/assets/sounds       原版音色（运行时使用）
 - `.nbs` 读取（v0–v5，含自定义音色、层名、层锁定/音量/声道）与写出（可选 v1–v5）
 - `.nbp` 片段导入导出、最近歌曲（浏览器本地缓存，可直接重新打开）
 - MIDI 导入（SMF 0/1，轨道勾选、音色指配、力度映射、PPQ 换算、BPM→t/s 保留两位小数）
+- **从 cbnote 的 `.cbnd` 导入**（位流格式：4b 乐器 + 7b 音高 + 16b tick+1，含循环标记）
+- **从指令 `.txt` 导入**：解析 `execute … run playsound …` 反推音符（音色、音高、音量、刻位）
 - **schematic（.schem）导出**：直轨/环线/分支布局、中继器充能时序、矿车轨道
 - **数据包（datapack）导出**：逐音符函数文件、`pack.mcmeta`、版本选择
 - 拖放文件打开
@@ -104,6 +107,39 @@ src/assets/sounds       原版音色（运行时使用）
 - 琴键按下时额外叠一层加法黄色高亮：GameMaker 的 `color` 参数是乘法混合，深色黑键几乎看不出变化，这一处是为可读性做的有意增强
 - 鼠标停在「可按住上下拖动改数值」的输入框上时显示上下双箭头（`ns-resize`），与原版一致
 - 画布上鼠标为普通箭头（不是十字准星）
+
+## 从 cbnote 导入
+
+[cbnote](https://github.com/Zero-Raltal/MCBE-CBNoteBlock) 是同一作者的 MCBE 指令音乐工具，
+本仓库支持它导出的两种格式：
+
+**`.cbnd`（推荐）**：位流格式，含速度（t/s）与循环标记，信息最完整，导入后即刻可播放。
+
+**指令 `.txt`**：解析 `execute … run playsound …` 反推音符。这类文件在传抄过程中极易被污染，
+导入前会统一清洗：
+
+| 干扰 | 处理 |
+|---|---|
+| CRLF / CR / LF 混用 | 统一换行 |
+| 行尾续行反斜杠 `\` | 与后续行拼接（允许中间夹空行） |
+| 行首 `/` 或 `\`（含 `//`、全角 `／`） | 去掉（正文里的 `/` 不动，如 `minecraft:block/note_block`） |
+| 零宽空格 / BOM / 不间断空格 | 清除 |
+| 全角括号、逗号、等号、花括号 | 转半角 |
+| 中文 `【】` | 按上下文判断转 `{}` 还是 `[]` |
+| 成对引号（含 `“”‘’`） | 删除 |
+| 制表符 / 多余空格 | 归并为单空格 |
+| 以 `#` 或 `//` 开头的行 | 当作注释丢弃 |
+
+解析规则：
+
+- 音色取 `playsound` 后的第一个参数，`note.harp` / `minecraft:block.note_block.harp` 均可
+- 音高 `pitch` 反解为音高值：`key = 54 + 12 × log₂(pitch)`（与项链方块 C4 = 1.0 的约定一致）
+- 刻位支持两种写法：
+  - 显式刻 `execute as @a[scores={t=5}]` → 第 4 刻
+  - 取反式 `execute as @a[scores={t=-1..}] … unless entity @s[scores={t=!1,t=!3}]` → 第 0、2 刻
+    （`!` 后面列出的就是发声刻，这是基岩版选择器与 `unless` 形成的双重否定）
+- 音量 `volume` 映射为方块音量（0–1 → 0–100）
+- **速度无法从 txt 还原**（指令按刻编号，每刻实际时长取决于循环装置），导入后默认 10 t/s，可在左上角调整
 
 ## 与源码的有意差异
 

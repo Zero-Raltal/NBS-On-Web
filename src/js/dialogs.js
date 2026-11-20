@@ -20,6 +20,7 @@ function openFileMenu(x, y) {
     (S.selected !== 0 ? '^!' : '') + '导入片段......|' +
     (S.selected === 0 ? '^!' : '') + '导出片段......|' +
     '从 MIDI 文件导入......|-|' +
+    '从 CBND 导入......|从指令文本导入......|-|' +
     '导出为数据包......|导出为 schematic......|-|' +
     '关于本作品......';
   showMenu('file', x, y, s);
@@ -222,6 +223,9 @@ function menuAction(menu, label, idx, spos, target) {
     });
     else if (label === '导出片段......') { if (S.selected) downloadBytes(buildPattern(), (S.song_name || 'pattern') + '.nbp'); }
     else if (label === '从 MIDI 文件导入......') pickFile('.mid,.midi', (ab, n) => { try { importMidi(ab, n); } catch (e) { messageDialog(e.message, '错误'); } });
+    // cbnote 的两种格式：.cbnd 位流 与 指令 .txt。实现在 js/cbnd.js
+    else if (label === '从 CBND 导入......') importCbndDialog();
+    else if (label === '从指令文本导入......') importCommandTextDialog();
     else if (label === '导出为数据包......') {
       // 对照 menu_click.gml：window = w_datapack_export
       S.playing = 0; S.window = W_DATAPACK_EXPORT;
