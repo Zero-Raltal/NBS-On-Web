@@ -16,6 +16,11 @@ const UI = {
   msgQueue: [],
   modal: null,          // 消息框 / 确认框
   drag: { id: -1, start: 0, val: 0 },
+  /* "正在拖某个控件"（滑块 / 拖动条）。非 -1 时画布输入被屏蔽 ——
+     拖动这类控件时指针经常掠过画布，不能让那些移动/松开被当成画布操作。
+     注意：不要复用它代替 S.window = W_DRAG，W_DRAG 不是对话框窗口，
+     会让 drawWindows 停止绘制（详见 drawDragValue 的注释）。 */
+  dragLock: -1,
   clickedThisFrame: false,
 };
 
@@ -369,7 +374,53 @@ function drawAreaHeader(x, y, w, h, str) {
   text(x + 16, y - 6, str);
   setFont(FONT.main());
 }
+/* ====================== 拖动类控件的公共"锁定"机制 ======================== */
+/* 滑块（drawDragValue）、拖动条（drawDragBar）这类控件都是
+   「按下 → 拖动 → 松开」的三段式交互，有两个共同的坑：
+
+   1. 拖动中不能要求指针仍在控件矩形内。
+      手指/鼠标很容易滑出去，正确做法是按下时锁定，
+      之后只看"相对按下点的位移"，指针移到哪都继续生效。
+
+   2. 拖动期间必须屏蔽画布输入。
+      否则指针从控件挪到画布上松手时，画布的松开逻辑会凭空落一个音符。
+
+   对第 2 点，滚动条用的是 S.window = W_DRAG。但那个办法在这里【不适用】：
+   W_DRAG 不是对话框窗口（isDialogWindow 对它返回 false），
+   一旦设置，drawWindows 会在开头直接 return，
+   滑块函数本身就再也不会被调用 —— 拖动当场死掉。
+   滚动条能用是因为它画在编辑器常驻区域，每帧都会执行。
+
+   所以这里用一个独立的标志 UI.dragLock 表达"正在拖控件"，
+   由 handleGridInput 检查，效果等价但不会停掉对话框绘制。
+   两个控件共用同一套 acquire / release，避免各自演化出不一样的语义。 */
+function dragAcquire(id) {
+  UI.dragLock = id;
+}
+function dragRelease(id) {
+  // 只释放自己持有的锁，避免一个控件的松开解开另一个控件的锁
+  if (UI.dragLock === id) UI.dragLock = -1;
+}
+function dragLocked() {
+  return UI.dragLock !== -1 && UI.dragLock !== undefined && UI.dragLock !== null;
+}
+
 // 数值拖拽控件（对应 draw_dragvalue）
+/* 「按住上下拖动改数值」的输入框（速度、音量、拍号…）。
+ *
+ * 之前有三个毛病，合起来就是用户说的"反人类"：
+ *
+ *   1) 拖动中要求指针仍在控件矩形内 —— 鼠标稍微移出框数值就停了。
+ *   2) 拖动期间不锁画布输入 —— 指针挪到画布上松手会凭空落一个音符。
+ *   3) S.dragging 这个标志只写不读（死代码），一并去掉。
+ *
+ * 另外还有一个更隐蔽的：对话框做了 translate/scale 之后没有把鼠标坐标
+ * 映射回设计空间，导致横屏全尺寸（k=1、tx/ty 居中偏移）下滑块根本点不中。
+ * 那一处在 dialogs.js 的 dialogFrame() 里，已一并修掉。
+ *
+ * 现在统一成：按下 → 记录起点/基准值并 dragAcquire；
+ * 拖动 → 用绝对位移算值，与指针在不在框上无关；松开 → dragRelease。
+ */
 function drawDragValue(id, x, y, value, step) {
   const w = 60, h = 16;
   setColor(C.controlBg);
@@ -379,23 +430,33 @@ function drawDragValue(id, x, y, value, step) {
   setColor(C.text);
   setFont(FONT.main());
   text(x + w / 2, y + 2, String(value), 'center');
-  if (mouseRectangle(x, y, w, h) && G.mbp[0]) {
-    UI.drag = { id, start: G.mouse.y, val: value };
-    S.dragging = true;
+
+  const over = mouseRectangle(x, y, w, h);
+  if (over && G.mbp[0] && UI.drag.id !== id) {
+    UI.drag = { id, start: G.mouse.y, val: value, x, y, w, h };
+    dragAcquire(id);
   }
-  /* 悬停在本框上（或正在拖它）时，光标用上下双箭头 —— 与原版一致：
-     这类框的交互是「按住上下拖动改数值」，用 ns-resize 才表达得出方向。
-     参照 GML 里 curs = cr_size_ns 的写法（如 control_draw.gml 拖速度框）。 */
-  if (mouseRectangle(x, y, w, h) || UI.drag.id === id) G.cursor = 'ns-resize';
-  if (UI.drag.id === id && G.mb[0]) {
-    const d = (UI.drag.start - G.mouse.y) * step;
-    value = UI.drag.val + Math.round(d * 4) / 4;
-  } else if (UI.drag.id === id) {
-    UI.drag.id = -1; S.dragging = false;
+  /* 悬停在本框上（或正在拖它）时用上下双箭头 —— 与原版一致：
+     这类框的交互是「按住上下拖动改数值」，ns-resize 才表达得出方向。 */
+  if (over || UI.drag.id === id) G.cursor = 'ns-resize';
+
+  if (UI.drag.id === id) {
+    if (G.mb[0]) {
+      /* 用【相对按下点的绝对位移】算值：指针移到哪都有效，
+         不再要求它留在框内。向上拖 = 增大（与 ns-resize 的语义一致）。 */
+      const d = (UI.drag.start - G.mouse.y) * step;
+      value = UI.drag.val + Math.round(d * 4) / 4;
+    } else {
+      UI.drag.id = -1;
+      dragRelease(id);
+    }
   }
   return value;
 }
+
 // 拖动条（对应 draw_dragbar），返回 0..max 的值
+/* 与 drawDragValue 同一套锁定机制（见上面的 dragAcquire 说明）。
+   之前每帧都要求 mouseRectangle 命中，指针一离开就"甩掉"了拖动。 */
 function drawDragBar(val, max, x, y, w, isArea, label) {
   const c = G.ctx;
   const h = 4;
@@ -417,8 +478,23 @@ function drawDragBar(val, max, x, y, w, isArea, label) {
     text(x + w / 2, y - 8, label, 'center');
     setFont(FONT.main());
   }
-  if (mouseRectangle(x - 8, y, w + 16, 22) && (G.mb[0] || G.mbp[0])) {
-    UI.dragbarActive = true;
+
+  const over = mouseRectangle(x - 8, y, w + 16, 22);
+  const barId = 'bar:' + (label || '__bar');
+  if (over && G.mbp[0] && UI.dragLock !== barId) {
+    UI.dragbarId = barId;
+    dragAcquire(barId);
+  }
+  if (UI.dragbarId === barId) {
+    if (G.mb[0]) {
+      // 锁定后只看指针的横向位置，离开轨道也继续跟随
+      return clamp((G.mouse.x - x) / w, 0, 1) * max;
+    }
+    UI.dragbarId = null;
+    dragRelease(barId);
+    return val;
+  }
+  if (over && (G.mb[0] || G.mbp[0])) {
     return clamp((G.mouse.x - x) / w, 0, 1) * max;
   }
   return val;

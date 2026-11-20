@@ -18,7 +18,7 @@ const G = {
   mbd: [false, false, false],         // 本帧双击
   lastClick: [0, 0, 0],
   wheel: 0, wheelX: 0,
-  keys: {}, keysPressed: {}, lastKey: 0,
+  keys: {}, keysPressed: {}, keysPressedMod: {}, lastKey: 0,
   ctrl: false, shift: false, alt: false,
   time: 0, dt: 0, frame: 0,
   cursor: 'default',
@@ -386,7 +386,18 @@ function initInput() {
     if (e.key === 'F11') e.preventDefault();
     if (e.ctrlKey && !editing) e.preventDefault();
     const k = e.key;
-    if (!G.keys[k]) { G.keysPressed[k] = true; }
+    /* 【修饰键快照必须在这里记，不能到处理时再读 G.ctrl】
+       keydown → keyup 往往发生在同一帧之内（人手快，或合成事件连发）。
+       keyup 处理器会把 G.ctrl 重置成 e.ctrlKey = false，
+       等这一帧的 handleGlobalKeys 跑起来时 G.ctrl 已经是 false，
+       于是 Ctrl+A / Ctrl+E / Ctrl+D 这些全部被当成"没有按 Ctrl"而跳过。
+       表现就是：按 Ctrl+E 音高毫无变化（连全选都选不上）。
+       所以把按下那一刻的修饰键状态跟着这个键一起存；
+       处理时优先用这份快照，没有快照才退回实时值（兼容长按的 ctrl 组合）。 */
+    if (!G.keys[k]) {
+      G.keysPressed[k] = true;
+      G.keysPressedMod[k] = { ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey };
+    }
     G.keys[k] = true;
     G.lastKey = e.keyCode || k.charCodeAt(0);
     G.ctrl = e.ctrlKey; G.shift = e.shiftKey; G.alt = e.altKey;
@@ -406,6 +417,43 @@ function endFrameInput() {
   G.mbr = [false, false, false];
   G.wheel = 0;
   G.keysPressed = {};
+  G.keysPressedMod = {};
+}
+
+/* 帧异常的落地处理。
+ *
+ * 背景：一次抛异常曾让整个界面卡死。
+ *   editorFrame 里每帧都会跑 handleGlobalKeys → modeAction，
+ *   而 modeAction 调用了一个当时不存在的新函数，于是【每帧】都抛同样的错。
+ *   原来的 tick 把 cb(dt) 和 endFrameInput() 平铺在一起，
+ *   异常直接跳出了 tick，endFrameInput() 和下一帧 rAF 调度都被跳过 ——
+ *   帧循环停摆，表现就是"点了之后整个页面卡住，必须刷新"。
+ *
+ * 这里做三件事：
+ *   1. 同一个错误只往控制台报一次（用 message 去重），避免每帧刷屏；
+ *   2. 记录到 window.__nbsErrors，方便用户/我直接取出来定位；
+ *   3. 一旦连续多帧报错，就在左上角提示"已忽略运行错误"，
+ *      让用户知道界面还能用、不用急着刷新。 */
+const FRAME_ERR = { seen: {}, count: 0, lastMsg: '', notified: false };
+function reportFrameError(err) {
+  const msg = (err && (err.message || String(err))) || 'unknown error';
+  FRAME_ERR.count++;
+  FRAME_ERR.lastMsg = msg;
+  if (!FRAME_ERR.seen[msg]) {
+    FRAME_ERR.seen[msg] = 1;
+    try {
+      if (typeof window !== 'undefined') {
+        window.__nbsErrors = window.__nbsErrors || [];
+        if (window.__nbsErrors.length < 100) window.__nbsErrors.push(msg);
+      }
+    } catch (_) { }
+    console.error('[NBS] 运行错误（已隔离，不影响继续操作）:', err);
+  }
+  // 连续出错时给用户一个可见提示（只提示一次）
+  if (FRAME_ERR.count >= 30 && !FRAME_ERR.notified) {
+    FRAME_ERR.notified = true;
+    try { if (typeof setMsg === 'function') setMsg('已忽略运行错误：' + msg.slice(0, 40)); } catch (_) { }
+  }
 }
 
 /* ---------------------------------------------------------------- 主循环
@@ -461,8 +509,21 @@ function startLoop(cb) {
     G.time += dt;
     G.frame++;
     S.currspeed = 1;
-    cb(dt);
-    endFrameInput();
+    /* 【为什么必须 try/finally】
+       这一帧里任何一处抛异常（比如某个函数没定义、下标越界），
+       如果不兜住，会连带跳过 endFrameInput() 和下一帧的 requestAnimationFrame ——
+       帧循环就此停掉，页面表现为"整个界面卡死，必须刷新"。
+       更糟的是 G.keysPressed / G.mb 等输入状态停在"按下"上，
+       即使侥幸恢复也会重复触发同一个操作。
+       所以：异常记录一次（同类只报一次，避免刷爆控制台），
+       但输入清理与下一帧调度放在 finally 里【一定执行】。 */
+    try {
+      cb(dt);
+    } catch (err) {
+      reportFrameError(err);
+    } finally {
+      endFrameInput();
+    }
   };
 
   const rafStep = (t) => {

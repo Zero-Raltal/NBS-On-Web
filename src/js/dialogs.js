@@ -531,11 +531,15 @@ function dialogFrame(w, h) {
   if (fit.k !== 1) c.scale(fit.k, fit.k);
 
   /* 鼠标坐标反向映射到设计空间，保证"画在哪儿就能点在哪儿"。
-     不映射的话，缩放后所有 hit test 都会偏移，越靠右越点不准。 */
-  if (fit.k !== 1) {
-    G.mouse.x = (G.mouse.x - fit.tx) / fit.k;
-    G.mouse.y = (G.mouse.y - fit.ty) / fit.k;
-  }
+     必须【无条件】做，包括 fit.k === 1 的情况 ——
+     因为 translate(fit.tx, fit.ty) 在 k = 1 时同样生效：
+     设计坐标的 (0,0) 对应屏幕的 (tx, ty)，如果不平移回来，
+     所有 hit test 都会偏掉整整一个 tx/ty 的距离。
+     之前写成 `if (fit.k !== 1)` 才映射，于是横屏全尺寸（k = 1，tx/ty 居中偏移）
+     下对话框里每一个控件都点不中、滑块拖不动 —— 而竖屏缩小后反而正常，
+     这就是"有时候好使有时候不好使"的来源。 */
+  G.mouse.x = (G.mouse.x - fit.tx) / fit.k;
+  G.mouse.y = (G.mouse.y - fit.ty) / fit.k;
   S.dlg_fit = fit;
   S.dlg_scale = fit.k;
   S.dlg_origin = { x: fit.tx, y: fit.ty };

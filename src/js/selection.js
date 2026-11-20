@@ -578,8 +578,26 @@ function selectAll(instIndex, not) {
       }
     }
   }
+  /* 这里【不能】调 selectionTrim()。
+     原因：循环里的 removeBlockSelect() 已经把方块从 grid 搬进选区缓冲区，
+     colfirst/collast 随之被清成 -1；此时 selectionTrim() 会认为"选区里什么都没有"，
+     把 SEL.l/h 缩成 1x1，接着 selectionCodeUpdate / 后续的 selectionRemove
+     就只认得第一格 —— 表现为「按一次全选，方块几乎全没了」。
+     全选的选区边界本来就是 [0,0,endb0]，不需要 trim。
+     这一处与原版 GML 有意不同：GML 的 selection_exists 是按【绝对坐标】
+     索引的二维数组，trim 读它不会丢；这里 sidx() 是相对索引，语义对不上。 */
   SEL.x = 0; SEL.y = 0; SEL.l = enda0 + 1; SEL.h = endb0 + 1;
-  selectionTrim();
+
+  /* 把歌曲边界恢复到全选之前的值。
+     removeBlockSelect() 在最后一列/行被搬空时会把 S.enda / S.endb 往回缩，
+     这是它单独使用时的正确行为（GML 的 remove_block_select 同样这么做）；
+     但在 selectAll 里，方块只是"进了选区"，并没有真的被删除，
+     边界跟着缩下去会让后续逻辑以为歌曲变短了：
+       · S.starta 在 handlePlayback 里被 median(0, marker-中心, S.enda) 夹到 0
+         → 用户看到的就是「一按全选，预览位置跳回歌曲开头」；
+       · 玩家把选区放回去时，末尾的列/层已经不在可视范围内。
+     所以这里恢复到循环前的边界。 */
+  S.enda = enda0; S.endb = endb0;
   selectionCodeUpdate();
   const after = { sel: snapshotSelection(), reg: snapshotRegion(0, 0, S.arraylength, S.arrayheight) };
   historyPush(() => { restoreSelection(before.sel); restoreRegion(before.reg); },
@@ -741,4 +759,61 @@ function selectionApply(fn) {
 /* 更改选区音色 */
 function selectionChangeInstrument(insIndex) {
   return selectionApply((sel, i) => { sel.ins[i] = insIndex; });
+}
+
+/* ============================================================================
+ * 选区属性批量修改（对照 selection_changekey / changevel / changepan / changepit
+ * 以及对应的 selection_set*）
+ *
+ * 【为什么必须补齐这一组】
+ * 原版 mode_action(num) 是按当前编辑模式去真正改动音符的：
+ *      m_key 模式 → selection_changekey(12) / (-12) / (1) / (-1)
+ *      m_vel 模式 → selection_changevel(10) / (-10) / ...
+ *      m_pan 模式 → selection_changepan(10) / ...
+ *      m_pit 模式 → selection_changepit(10) / ...
+ * 之前的实现只写了 S.editmode = n - 1（切换模式），
+ * 完全没有改音符，于是 Ctrl+E / Ctrl+D 和右键菜单里那些
+ * "升八度 / 降八度 / 增加 10 音量…"点了都没反应 —— 菜单在说谎。
+ *
+ * 这些函数统一走 selectionApply，自带一步撤销。
+ * 参数 delta 与原版一致：key/vel/pan/pit 的增量。
+ * ========================================================================== */
+
+/* 音高（半音，12 = 一个八度）。范围与画布上手动编辑一致：0..87 */
+function selectionChangeKey(delta) {
+  return selectionApply((sel, i) => {
+    sel.key[i] = median(0, sel.key[i] + delta, 87);
+  });
+}
+
+/* 音量 0..100 */
+function selectionChangeVel(delta) {
+  return selectionApply((sel, i) => {
+    sel.vel[i] = median(0, sel.vel[i] + delta, 100);
+  });
+}
+
+/* 声道 0..200（100 = 居中） */
+function selectionChangePan(delta) {
+  return selectionApply((sel, i) => {
+    sel.pan[i] = median(0, sel.pan[i] + delta, 200);
+  });
+}
+
+/* 微分音 -1200..1200（单位是 1/100 半音） */
+function selectionChangePit(delta) {
+  return selectionApply((sel, i) => {
+    sel.pit[i] = median(-1200, sel.pit[i] + delta, 1200);
+  });
+}
+
+/* 对应的"直接设定"版本（重置/设定对话框用） */
+function selectionSetVel(v) {
+  return selectionApply((sel, i) => { sel.vel[i] = median(0, v, 100); });
+}
+function selectionSetPan(v) {
+  return selectionApply((sel, i) => { sel.pan[i] = median(0, v, 200); });
+}
+function selectionSetPit(v) {
+  return selectionApply((sel, i) => { sel.pit[i] = median(-1200, v, 1200); });
 }

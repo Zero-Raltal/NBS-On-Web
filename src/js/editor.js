@@ -72,8 +72,14 @@ function computeLayout() {
      "直接检测页面长宽比例，实时变化"就是这里。
      阈值取 1.15 而不是 1.0：方块状窗口（比如 DevTools 并排时）按桌面布局
      排布更舒服，只有明显竖长才切抽屉模式。
-     全屏模式不受影响（它本来就只留网格）。 */
-  S.portrait = (!S.fullscreen && rh >= rw * 1.15) ? 1 : 0;
+      注意这里【不排除 fullscreen】。原来的写法是
+         S.portrait = (!S.fullscreen && rh >= rw * 1.15) ? 1 : 0;
+      于是竖屏下点抽屉里的「编辑区域」（它把 S.fullscreen 置 1）会同步让
+      portrait 失效、掉进桌面分支：桌面分支固定扣掉 270px 的图层面板，
+      390 宽的屏幕上网格只剩 3 列，工具栏和状态栏也按横屏摆放，
+      整个界面就进入一种说不清的错乱状态。「编辑区域」的本意只是把网格铺满，
+      不应该改变竖屏/横屏的布局模式，所以竖屏判定只看宽高比。 */
+  S.portrait = (rh >= rw * 1.15) ? 1 : 0;
 
   if (S.portrait) {
     /* 竖屏：宽度是最稀缺的资源。
@@ -97,8 +103,22 @@ function computeLayout() {
        底部固定占用 = 横向滚动条 16 + 状态栏 24 + 抽屉标签条 30 + 余量。 */
     S.info_h = 40;
     S.y1 = (S.toolbar_h || 52) + S.info_h;
-    const bottomFixed = 16 + 24 + 30 + 22;
-    S.totalrows = Math.max(1, floor((rh - (S.y1 + 34) - bottomFixed) / 32));
+    /* 【竖屏下的「编辑区域」（fullscreen）】
+       抽屉里的「编辑区域」按钮把 S.fullscreen 置 1，意图是"让网格铺满"。
+       桌面分支靠 rhval = 32 实现（只留 32px 底边）；
+       竖屏这里同样处理：把顶部信息条和底部固定占用都收掉，
+       只留顶栏 + 一圈余量，让网格尽可能大。
+       之前竖屏分支完全没有读 S.fullscreen，所以点了之后布局一点没变，
+       却因为 portrait 被排除而整体掉进桌面分支 —— 那个"莫名其妙的状态"。 */
+    if (S.fullscreen) {
+      S.info_h = 0;
+      S.y1 = 4;
+      S.totalcols = floor(rw / 32) + 1;
+      S.totalrows = Math.max(1, floor((rh - 8) / 32));
+    } else {
+      const bottomFixed = 16 + 24 + 30 + 22;
+      S.totalrows = Math.max(1, floor((rh - (S.y1 + 34) - bottomFixed) / 32));
+    }
   } else {
     S.info_h = 0;
     if (!S.fullscreen && S.show_layers) S.totalcols = floor((rw - 8 - 270) / 32);
@@ -215,6 +235,17 @@ function editorFrame(dt) {
   drawEditor(dt);
   G.mb = rawMb; G.mbp = rawMbp; G.mbr = rawMbr; G.wheel = rawWheel;
   drawWindows();
+  /* 拖控件锁的兜底释放。
+     注意时机：drawWindows() 里滑块/拖动条已经跑过一次 ——
+     若左键仍按着，dragLock 是有效的，不能清；
+     若这一帧左键已经松开（!G.mb[0]），控件本该在那一帧自己清掉它；
+     但不巧控件那一帧没被绘制（窗口被关、面板滚走）就会残留，
+     画布将永久收不到输入。所以只在"已经松开"时兜底清一次。 */
+  if (dragLocked() && !G.mb[0] && !G.mbp[0]) {
+    UI.dragLock = -1;
+    UI.dragbarId = null;
+    if (UI.drag) UI.drag.id = -1;
+  }
   drawMenu();
   drawMessageBox();
   drawPopup();
@@ -229,6 +260,18 @@ function editorFrame(dt) {
 function handleGlobalKeys() {
   if (UI.textFocus >= 0 || UI.modal || UI.menu) return;
   const K = G.keysPressed;
+  const KM = G.keysPressedMod || {};
+  /* 取"某个键在按下那一刻"的修饰键状态。
+     keydown 与 keyup 经常落在同一帧内，keyup 会把 G.ctrl 清成 false，
+     等这一帧处理时实时值已经不可靠了（Ctrl+A / Ctrl+E 全部失效）。
+     有快照就用快照，没有才退回实时值（兼容"先按住 Ctrl 再点鼠标"这类操作）。 */
+  const modOf = (k) => KM[k] || { ctrl: G.ctrl, shift: G.shift, alt: G.alt };
+  const modAny = () => {
+    // 本帧有按键时，按第一个按键的快照决定主修饰状态
+    const ks = Object.keys(K);
+    if (ks.length) return modOf(ks[0]);
+    return { ctrl: G.ctrl, shift: G.shift, alt: G.alt };
+  };
   // 方向键与快进快退按钮都是"按住才生效"，每帧先归零
   if (S.window !== W_DRAGMARKER) {
     S.forward = 0;
@@ -241,7 +284,8 @@ function handleGlobalKeys() {
     else if (kk && kk.length === 1) { S.piano_key[S.key_edit] = kk.toUpperCase().charCodeAt(0); S.key_edit = -1; saveSettings(); }
     return;
   }
-  const ctrl = G.ctrl, shift = G.shift;
+  const mainMod = modAny();
+  const ctrl = mainMod.ctrl, shift = mainMod.shift;
 
   if (K['F11']) { S.fullscreen = !S.fullscreen; setMsg(S.fullscreen ? '全屏模式 => 开启' : '全屏模式 => 关闭'); }
   if (K['F10']) { S.blackout = !S.blackout; setMsg(S.blackout ? '全黑模式 => 开启' : '全黑模式 => 关闭'); }
@@ -363,19 +407,48 @@ function setPlayAnchor(pos) {
   S.play_anchor_expected = pos;   // 上一帧算出的位置，用于检测外部改动
 }
 
-/* 按音频时钟推进播放位置。返回本帧应推进到的位置。 */
 function advanceByAudioClock() {
   // 没有音频上下文（未初始化/被挂起）时退回 dt 累加，保证仍能播放
   if (!AU.ctx || AU.ctx.state !== 'running') {
     S.marker_pos += S.tempo * G.dt;
     return S.marker_pos;
   }
-  /* 检测「位置被外部改过」：用户拖动播放标记、点时间轴跳转、
-     按 Home/End 等都会直接写 S.marker_pos。这种情况必须以新位置重锚，
-     否则上面算出的位置会立刻把用户的拖动结果覆盖掉。
-     用 0.5 格的容差，避免浮点噪声误判。 */
-  const drift = Math.abs(S.marker_pos - (S.play_anchor_expected === undefined ? S.marker_pos : S.play_anchor_expected));
-  if (typeof S.play_anchor_time !== 'number' || S.play_anchor_tempo !== S.tempo || drift > 0.5) {
+  const expected = (S.play_anchor_expected === undefined) ? S.marker_pos : S.play_anchor_expected;
+  const drift = Math.abs(S.marker_pos - expected);
+
+  /* 【锚点过期就重建，不能拿旧锚点硬算】
+     锚点可能因为外部直接改状态而变得很旧（测试/调试，或某些跳转路径只改了
+     S.playing 而没有重锚）。这时 elapsed 会是个很大的数，一外推位置就飞出去，
+     表现为"恢复播放后速率完全不对"。
+     阈值取 5 秒：正常后台兜底定时器最慢 1 次/秒，最多也就 1~2 秒；
+     超过 5 秒说明这个锚点已经跟当前时刻彻底脱节（比如外部直接改了状态），
+     此时"以当前位置重建"比"按旧锚点硬算"安全得多。 */
+  if (typeof S.play_anchor_time === 'number' && AU.ctx.currentTime - S.play_anchor_time > 5) {
+    setPlayAnchor(S.marker_pos);
+  }
+
+  /* ---------------- 变速：平滑重锚，不要"往回跳" ----------------
+     原来把"tempo 变了"和"位置被外部拖动过"塞进同一个分支，一律以
+     S.marker_pos 重新锚定。可那一刻 S.marker_pos 还是【上一帧】的值，
+     于是每一帧调速都把位置往回拽一点点 —— 听起来就是卡顿、发涩、跳音。
+     正确做法分两步：
+       1. 先按【旧锚点的速度】把位置算到"此刻"；
+       2. 再以这个"此刻位置"作为新锚点，换新速度继续走。
+     位置因此是连续的（不回跳），只是斜率变了 —— 和原版拖速度滑块的手感一致。
+   */
+  if (typeof S.play_anchor_time === 'number' && S.play_anchor_tempo !== S.tempo) {
+    const el0 = Math.max(0, AU.ctx.currentTime - S.play_anchor_time);
+    const posNow = S.play_anchor_pos + el0 * (S.play_anchor_tempo || S.tempo);
+    setPlayAnchor(posNow);
+    S.marker_pos = posNow;
+    /* 【变速时绝不重置 S.sched_col】
+       游标一旦回退，scheduleAhead 会把已经播过的列重新排一遍 ——
+       这正是"进度条正好压在某个音符块上时调速，那个块被重复触发好几次"的原因。
+       游标只前进，由 scheduleAhead 自己按时间推进。 */
+    return S.marker_pos;
+  }
+
+  if (typeof S.play_anchor_time !== 'number' || drift > 0.5) {
     setPlayAnchor(S.marker_pos);
     // 位置被外部挪动（拖动标记/点时间轴/按 Home），排期游标要跟过去，
     // 否则 scheduleAhead 会从旧位置继续补排，把已经过去的列又播一遍
@@ -498,24 +571,40 @@ function scheduleAhead() {
   const gap = S.last_tick_gap || 0;
   const lookahead = gap > 0.2 ? LOOKAHEAD_BG : LOOKAHEAD_FG;
   const horizon = now + lookahead;
+  /* 用【当前锚点自己的速度】算"现在播到第几列"，而不是直接读 S.tempo。
+     变速的那一帧，advanceByAudioClock 已经用「旧速度」把位置推到此刻、
+     再以此刻为新锚点换了新速度；锚点里记的 tempo 才是这段区间的正确斜率。
+     直接读 S.tempo 会在新旧速度交接的那一帧算出偏移量，导致游标前跳/后退，
+     进而重复排期同一列（听感就是那个音符被触发好几次）。 */
+  const anchorTempo = Math.max(0.25, S.play_anchor_tempo || S.tempo);
   const tempo = Math.max(0.25, S.tempo);
 
-  const cur = floor(S.play_anchor_pos + (now - S.play_anchor_time) * tempo);
+  const cur = floor(S.play_anchor_pos + (now - S.play_anchor_time) * anchorTempo);
   /* 游标落后于当前位置时【不要跳过中间的列】——
      那些列的音符还没发过声。最小化期间定时器可能几秒才来一次，
      如果在这里直接 S.sched_col = cur，中间几百列就被整段丢掉了
      （实测最小化 4 秒漏掉 22 列）。
      正确做法是把它们以「立即发声」的方式补上：when 会被 clamp 到 now，
      声音会挤在一起但不会丢，听感上是从后台切回来时把落下的音补齐。 */
+  /* 【游标只进不退】
+     变速时如果让游标后退，已经播过的列会被重新排期 ——
+     进度条正压在某个音符块上调速时，那个块就会连响好几次。
+     所以这里只处理"落后很多需要追赶"的情形，绝不回退游标。 */
   if (S.sched_col < cur - 1) {
     // 落后太多（切回前台时可能积压上百列）就只补最近的一小段，避免一次性爆音
     const MAX_CATCHUP = 200;
     if (cur - S.sched_col > MAX_CATCHUP) S.sched_col = cur - MAX_CATCHUP;
   }
+  /* 游标跑到了当前位置前面很多（比如变速把时间轴整体提前），
+     说明这些列已经在旧速度下排过期了；不要因为"位置还没到"就重复排，
+     只在确定没排过时才继续。用 max 保证单调。 */
+  if (S.sched_col < 0) S.sched_col = 0;
 
   let guard = 0;
   while (S.sched_col <= S.enda && guard++ < 512) {
     const col = S.sched_col;
+    /* 用新速度换算每一列的真实发声时刻：锚点是"此刻 @ 新速度"，
+       所以 col 相对锚点位置的差值除以新速度即可。 */
     const when = S.play_anchor_time + (col - S.play_anchor_pos) / tempo;
     if (when > horizon) break;
 
@@ -547,10 +636,24 @@ function playColumnRange(start, end, audioWhen) {
     if (colamount[xx] > 0) {
       for (let b = colfirst[xx]; b <= collast[xx]; b++) {
         if (!gExists(xx, b)) continue;
-        let a = 1, c = 1, d = 100, e = 0;
+        /* 默认值必须是"满音量"，不能是 1。
+           这里的 c/d/e 是【绝对】音量/声道/音高，不是倍率：
+           下面 c = (layervol/100) * gVel(...)，gVel 是 0..100 的音量值。
+           之前把 c 初始化成 1 —— 一旦走进 b >= S.endb2 的分支（该层的音量设置
+           数组还没覆盖到），c 就停在 1，等于 1/100 的音量，
+           听感上"几乎听不到"。而键盘预览走的是 playSound(..., 100, ...) 固定 100。
+           这就是「手机上点键盘试听很正常，落到画布再播放却小得几乎听不见」的原因。
+           d（声道）同理，默认应为 100（居中），e（音高）默认 0。 */
+        let a = 1, c = 100, d = 100, e = 0;
         if (b < S.endb2) {
           c = (S.layervol[b] / 100) * gVel(xx, b);
           d = S.layerstereo[b] === 100 ? gPan(xx, b) : (S.layerstereo[b] + gPan(xx, b)) / 2;
+          e = gPit(xx, b);
+        } else {
+          /* 该层不在 endb2 范围内（图层参数数组还没覆盖到它）：
+             退化成"直接用这个音符自己的属性"，音量仍然是 0..100。 */
+          c = gVel(xx, b);
+          d = gPan(xx, b);
           e = gPit(xx, b);
         }
         if (S.solostr !== '') {
@@ -610,14 +713,42 @@ function togglePlaying(cols) {
     // 起播时以音频时钟为基准重新锚定，后台运行也不会跑偏
     if (AU.ctx && AU.ctx.state === 'suspended') AU.ctx.resume();
     setPlayAnchor(S.marker_pos);
-    /* 排期游标从当前列开始。当前列立刻排（不提前），
-       否则起播瞬间会听到一小段被压缩的"预热"。 */
-    S.sched_col = floor(S.marker_pos);
-    const xx = floor(S.marker_pos);
-    if (xx <= S.enda) playColumnRange(xx, xx);
-    S.sched_col = xx + 1;
+    /* 【起播不要重播"标记停在哪一列"的那一列】
+       原版 GML 的 toggle_playing 会立刻 play 一遍 floor(marker_pos) 那一列：
+       从头开始播时这没问题，但从暂停处继续时，那一列在暂停前【已经响过了】，
+       再来一遍听起来就是"恢复了却先多响一下"，和原版手感不一致
+       （用户明确要求对齐原版：停在某个音符上恢复播放，不该再播那个音符）。
+
+       所以区分两种起播：
+         · 从头/跳转后起播（暂停时没有记录、或位置被外部改动过）→ 照旧唱这一列；
+         · 从暂停处继续（暂停时记下了同一列）→ 从下一列开始，不重播。
+       为了不放过"暂停在半路、这一列其实没唱过"的情况，
+       暂停时记录 S.pause_col 与这一列是否已发声过（S.pause_col_played）。 */
+    const resumeCol = floor(S.marker_pos);
+    const fromPause = (S.pause_col === resumeCol) && S.pause_col_played;
+    S.sched_col = fromPause ? resumeCol + 1 : resumeCol;
+    if (!fromPause) {
+      const xx = resumeCol;
+      if (xx <= S.enda) playColumnRange(xx, xx);
+      S.sched_col = xx + 1;
+    }
+    S.pause_col = -1;
+    S.pause_col_played = 0;
   } else {
     S.timestoloop = S.loopmax;
+    /* 暂停：记下停在哪一列、以及这一列此刻是否已经响过。
+       判断依据是 S.grid.played 的时间戳：<= 现在 说明已经发声（或正在发声），
+       恢复时就不该再唱一遍。 */
+    const pc = floor(S.marker_pos);
+    let played = 0;
+    if (pc >= 0 && pc < S.arraylength) {
+      for (let b = 0; b < S.endb2; b++) {
+        const tt = S.grid.played[gidx(pc, b)];
+        if (tt && tt <= G.time + 0.02) { played = 1; break; }
+      }
+    }
+    S.pause_col = pc;
+    S.pause_col_played = played;
     /* 暂停：必须撤掉已经提前排进未来时间轴的音符。
        不撤的话，暂停后还会继续响一小段（最多前瞻窗口那么长），
        而且那些音的刻位比当前刻度线更靠后 —— 正是「没到那个音符却响了」。
@@ -716,6 +847,17 @@ function handleGridInput() {
   handleWheel();
 
   // 按下
+  /* 【画布输入必须"从画布开始"才算数】
+     判据是按下那一刻指针在不在画布上，而不是松开时在不在。
+     否则在滑块/按钮上按下、拖到画布上松手时，这一帧指针恰好在画布内，
+     G.mbr[0] 为真、clickinarea 又为 1 —— 凭空落一个音符。
+
+     另外 dragLocked() 表示"正在拖某个控件"（滑块/拖动条）：
+     这类控件在拖动过程中指针经常会掠过画布，此时任何按下/松开都不该算画布操作。 */
+  if (dragLocked()) {
+    S.clickinarea = 0;
+    return;
+  }
   if (G.mbp[0] || G.mbp[2] || G.mbp[1]) S.clickinarea = 1;
   if (G.mbp[0]) {
     if (S.selected > 0 && !G.ctrl) { selectionPlace(false); S.dontplace = 1; }
@@ -781,6 +923,9 @@ function handleGridInput() {
     S.select = 0;
     S.select_pressx = -1; S.select_pressy = -1;
     S.select_pressa = -1; S.select_pressb = -1;
+    /* 松开后立刻清掉"按下点在画布内"的标记。
+       不清的话它会残留到下一次交互，与别的控件（滑块、按钮）的松开撞在一起。 */
+    S.clickinarea = 0;
   }
   if (G.mbr[2]) {
     if (S.rightPress && !S.rightPress.moved && !S.rightPress.removed && !G.ctrl) {
@@ -2751,8 +2896,51 @@ function drawMsg() {
 }
 
 /* 音色切换时的模式动作 */
+/* 对照 mode_action.gml 逐条移植。
+ *
+ * 【这里之前是错的，而且错得很隐蔽】
+ * 原来写的是：
+ *     if (n <= 4) { S.editmode = n - 1; }
+ *     else if (n === 5) { if (S.selected) { } }
+ * 也就是"把 num 当成编辑模式编号"存了一下，别的什么都没做。
+ * 而原版 mode_action(num) 的语义是：在【当前编辑模式】下执行动作 num ——
+ *     m_key 模式 → selection_changekey(12/-12/1/-1)
+ *     m_vel 模式 → selection_changevel(10/-10/1/-1)，5 打开设定对话框，6 重置
+ *     m_pan 模式 → selection_changepan(10/-10/1/-1)，5 打开对话框，6 重置
+ *     m_pit 模式 → selection_changepit(10/-10/1/-1)，5 打开对话框，6 重置
+ * 所以用户按 Ctrl+E / Ctrl+D（num = 1 / 2）、或点右键菜单里那些
+ * "升八度 / 降八度 / 增加 10 音量…" 时，音符【一点都没变】。
+ *
+ * m_key / m_vel / m_pan / m_pit 的编号见 song.js 顶部的常量（0..3）。 */
 function modeAction(n) {
-  // 对应 get_mode_actions / mode_action：1 音调 2 音量 3 声道 4 音高 5 替换 6 ...
-  if (n <= 4) { S.editmode = n - 1; }
-  else if (n === 5) { if (S.selected) { } }
+  if (S.selected === 0) return 0;
+  const mode = S.editmode | 0;
+  if (mode === 0) {                       // m_key：音高
+    if (n === 1) return selectionChangeKey(12);
+    if (n === 2) return selectionChangeKey(-12);
+    if (n === 3) return selectionChangeKey(1);
+    if (n === 4) return selectionChangeKey(-1);
+  } else if (mode === 1) {                // m_vel：音量
+    if (n === 1) return selectionChangeVel(10);
+    if (n === 2) return selectionChangeVel(-10);
+    if (n === 3) return selectionChangeVel(1);
+    if (n === 4) return selectionChangeVel(-1);
+    if (n === 5) { S.window = W_SETVELOCITY; return 1; }
+    if (n === 6) return selectionSetVel(100);
+  } else if (mode === 2) {                // m_pan：声道
+    if (n === 1) return selectionChangePan(10);
+    if (n === 2) return selectionChangePan(-10);
+    if (n === 3) return selectionChangePan(1);
+    if (n === 4) return selectionChangePan(-1);
+    if (n === 5) { S.window = W_SETPANNING; return 1; }
+    if (n === 6) return selectionSetPan(100);
+  } else if (mode === 3) {                // m_pit：微分音
+    if (n === 1) return selectionChangePit(10);
+    if (n === 2) return selectionChangePit(-10);
+    if (n === 3) return selectionChangePit(1);
+    if (n === 4) return selectionChangePit(-1);
+    if (n === 5) { S.window = W_SETPITCH; return 1; }
+    if (n === 6) return selectionSetPit(0);
+  }
+  return 0;
 }

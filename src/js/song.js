@@ -221,6 +221,11 @@ function reset() {
   S.play_anchor_tempo = undefined;
   S.play_anchor_expected = 0;
   S.last_tick_gap = 0;
+  /* 暂停时的位置快照：用来判断"恢复播放要不要重播标记所在的那一列"。
+     pause_col = 暂停时刻的列号；pause_col_played = 那一列此刻是否已经响过。
+     见 editor.js 的 togglePlaying。 */
+  S.pause_col = -1;
+  S.pause_col_played = 0;
   S.section_exists = 0; S.section_start = 0; S.section_end = 0;
   S.song_name = ''; S.song_author = ''; S.song_orauthor = ''; S.song_desc = '';
   S.work_mins = 0; S.work_left = 0; S.work_right = 0; S.work_add = 0; S.work_remove = 0;
@@ -286,6 +291,13 @@ function addBlock(x, y, ins, key, vel, pan, pit, insnum) {
   if (y > collast[x]) collast[x] = y;
   if (x >= S.enda) S.enda = x;
   if (y >= S.endb) S.endb = y;
+  /* S.endb2 是"图层参数数组（layername/layervol/layerstereo/layerlock）覆盖到的层数"，
+     不是"有音符的层数"。往一个还没被参数数组覆盖的层里加音符时，
+     必须把它一起撑大 —— 否则 playColumnRange 里 `b < S.endb2` 不成立，
+     那一层的音量/声道/音高设置全被跳过（历史上这里退化成音量 1/100，
+     表现为"音符音量明明是 100，播放却几乎听不到"）。
+     S.endb 是"最高有音符的层"，S.endb2 是"参数数组长度"，两者都必须跟上。 */
+  if (y >= S.endb2) S.endb2 = y + 1;
   return 1;
 }
 
@@ -311,6 +323,8 @@ function addBlockManual(x, y, ins, key, vel, pan, pit) {
   if (y > collast[x]) collast[x] = y;
   if (x >= S.enda) S.enda = x;
   if (y >= S.endb) S.endb = y;
+  /* 同 addBlock：把图层参数数组一起撑大，否则这一层的音量设置会被跳过。 */
+  if (y >= S.endb2) S.endb2 = y + 1;
   if (o && o.loaded) playSound(o, key, vel, pan, pit);
   historySet(H_ADD, x, y, ins, key, vel, pan, pit);
   return 1;
@@ -469,8 +483,16 @@ function addLayer(index, undo, name, lock, vol, stereo) {
       S.grid.vel[src] = 0; S.grid.pan[src] = 0; S.grid.pit[src] = 0;
     }
   }
+  /* 插入一层后，被插入位置及其下方的层都上移一位，colfirst/collast 跟着 +1。
+     这里原来写的是：
+         if (colfirst[a] > index) colfirst[a]++;
+         if (collast[a] >= index) collast[a]++;
+     与 removeLayer 一样是不对称的：colfirst 用 >，collast 用 >=。
+     两个边界必须用同一套判据（插入点之后的层整体 +1），否则区间会走形。
+     插入是纯搬移、没有方块被销毁，所以直接按 > / >= 一起加就够了，
+     与 removeLayer 那种"层被销毁、边界可能正好是被删层"的情况不同。 */
   for (let a = 0; a < S.arraylength; a++) {
-    if (colfirst[a] > index) colfirst[a]++;
+    if (colfirst[a] >= index) colfirst[a]++;
     if (collast[a] >= index) collast[a]++;
   }
   S.endb++;
@@ -509,9 +531,34 @@ function removeLayer(index, undo) {
       S.grid.exists[s] = 0; S.grid.ins[s] = 0; S.grid.key[s] = 0;
     }
   }
+  /* 删掉一层后，每列的 colfirst / collast 要跟着它上面那些层一起下移。
+     这里原来写的是：
+         if (colfirst[a] > index) colfirst[a]--;
+         if (collast[a] >= index) collast[a]--;
+     第二个条件用 >= 是错的：当 collast[a] === index（该列最底下正好是被删的层）
+     时，减 1 会把它指到一个可能空着的位置；而 colfirst[a] === index 时却又
+     不减（条件用的是 >），两者不对称。结果是 colfirst/collast 描述的区间
+     与真实数据错位，绘制和删除都按错的区间遍历 ——
+     表现就是「点一次删除，画布上各层的音符随机消失一点」：
+     区间被收窄后，落在收窄区间外的音符画不出来，再删一次区间又变一次。
+     正确做法：边界大于 index 才减 1；等于 index 的（被删层本身）
+     直接按搬移后的真实数据重新扫一遍。 */
   for (let a = 0; a < S.arraylength; a++) {
-    if (colfirst[a] > index) colfirst[a]--;
-    if (collast[a] >= index) collast[a]--;
+    let nf = colfirst[a], nl = collast[a];
+    if (nf > index) nf--;
+    if (nl > index) nl--;
+    // 被删层正好是某个边界时，扫真实数据重算这一列
+    if (colfirst[a] === index || collast[a] === index) {
+      nf = -1; nl = -1;
+      for (let b = 0; b < S.endb2; b++) {
+        if (gExists(a, b)) { if (nf < 0) nf = b; nl = b; }
+      }
+    }
+    // 该列已经空了：两个边界都归 -1，避免残留旧值把区间撑成非法长度
+    if (nf < 0 || nl < 0) {
+      nf = -1; nl = -1; colamount[a] = 0;
+    }
+    colfirst[a] = nf; collast[a] = nl;
   }
   S.endb = Math.max(0, S.endb - 1);
   S.endb2 = Math.max(0, S.endb2 - 1);
