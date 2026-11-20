@@ -44,10 +44,47 @@ const CBND_INSTRUMENT_ORDER = [
    用户导入后仍可在左上角速度框调整。 */
 const CMDTEXT_DEFAULT_TEMPO = 20;
 
-/* cbnote 的音符 key 与 NBS 的 key 是同一套编号：
-   keyToPitch(key) = 2^((key-54)/12)，而 Minecraft 的 note.harp pitch 也以 C4(=54) 为 1.0，
-   NBS 的 play_sound 又是 0.5*2^((key-78)/12)。
-   两侧都以「C4 = 1.0 播放速率」为基准，所以 key 可以【直接】用，不需要 ±12 修正。 */
+/* ---------------------------------------------------------------- key 编号换算
+ *
+ * 【两侧的 key 不是同一套编号，必须偏移 9】
+ *
+ * cbnote（= Minecraft 的 playsound 参数）：
+ *     pitch = 2^((key - 54) / 12)
+ *   key 54 → pitch 1.0，而 cbnote 的 getNoteName(54) = 'F#' + floor(54/12)=4 → F#4。
+ *   也就是说 cbnote 的 54 是 F#4，不是 C4。
+ *
+ * 我们（NBS 语义）：
+ *     rate = 0.5 * 2^((key + ins.key - 78) / 12)，内置音色 ins.key = 45
+ *   所以 rate = 2^((key - 33) / 12)，rate 1.0 出现在 key 33。
+ *   而 getKeyname(33) = KEYNAMES[33%12=9] + floor((33-3)/12)+1 = 'F#' + 3 → 也是 F#4。
+ *
+ * 两者指向同一个音（F#4），但编号相差 54 - 45 = 9。
+ * 直接拿 cbnote 的 key 当 NBS 的 key 用，导入后会整体高 9 个半音
+ * （小六度），听起来比游戏里和 cbnote 里都明显高 —— 这就是
+ * 「从 cbnd / 指令 txt 导入后音高不对」的原因。
+ *
+ * 换算：
+ *     NBS key = cbnote key - 9
+ *     cbnote key = NBS key + 9
+ *
+ * 注意中间可能越界（cbnote 的 key 可到 0..87，减 9 后可能是负数），
+ * 所以 addBlock 前要 clamp 到 NBS 允许的 0..87；clamp 掉的音会记进
+ * stats 供提示用户。
+ */
+const CBND_TO_NBS_KEY = -9;
+
+/* 最近一次 applyCbndImport 的附加信息（越界音符数等），供对话框拼提示。
+   用模块级变量而不是改返回值 —— 返回值一直表示「写入音符数」。 */
+let LAST_IMPORT_INFO = null;
+
+/* 越界提示片段：key 换算后若有音被 clamp，返回一句提示，否则返回空串。
+   有越界通常说明源文件用了超出 NBS 音域的音（cbnote 的 key 可到 0/87
+   以外，减 9 后可能为负）。 */
+function importRangeNote() {
+  const n = LAST_IMPORT_INFO && LAST_IMPORT_INFO.outOfRange;
+  if (!n) return '';
+  return '．有 ' + n + ' 个音超出 NBS 音域，已移到最近的端点';
+}
 
 /* NBS 的乐器编号与 cbnote 的 CBND_INSTRUMENT_ORDER 下标一致，
    但打击乐（2..4）在 Minecraft 里音高固定，导入时仍按 key 写入即可。 */
@@ -555,12 +592,26 @@ function applyCbndImport(result, songName) {
   S.tempo = Math.max(0.25, Math.min(30, Number.isFinite(tIn) ? tIn : CMDTEXT_DEFAULT_TEMPO));
   S.filename = songName || '';
 
+  /* ---- 0. key 编号换算：cbnote/Minecraft 的 key − 9 = NBS 的 key
+     （推导见文件顶部 CBND_TO_NBS_KEY 的注释。不换算会整体高 9 个半音。）
+     越界的音 clamp 到 0..87（NBS 允许范围），并统计数量用于提示。 */
+  const converted = [];
+  let outOfRange = 0;
+  for (const n of notes) {
+    let k = (n.key | 0) + CBND_TO_NBS_KEY;
+    if (k < 0) { k = 0; outOfRange++; }
+    else if (k > 87) { k = 87; outOfRange++; }
+    // velocity 缺省按满力度；cbnd 里没有力度概念，txt 里由音量换算而来
+    const v = Number.isFinite(n.velocity) ? Math.max(0, Math.min(100, Math.round(n.velocity))) : 100;
+    converted.push({ tick: n.tick, instrument: n.instrument, key: k, velocity: v });
+  }
+
   /* ---- 1. 先按「同乐器同刻同 key」去重，再算每种乐器需要多高的层带 ---- */
   const deduped = [];
   const insSet = new Set();
   {
     const seen = new Set();
-    for (const n of notes) {
+    for (const n of converted) {
       const sig = n.instrument + ':' + n.tick + ':' + n.key;
       if (seen.has(sig)) continue;
       seen.add(sig);
@@ -666,6 +717,10 @@ function applyCbndImport(result, songName) {
   recalcSong();
   S.changed = 0;
   historyReset();
+  /* 供对话框生成提示：key 换算后有多少个音被 clamp（越界）。
+     用模块级变量而不是改返回值 —— 返回值是「写入音符数」，
+     已有调用方和测试都按数字用，换对象会破坏它们。 */
+  LAST_IMPORT_INFO = { outOfRange: outOfRange, instruments: insOrder.length, layers: totalLayers };
   return written;
 }
 
@@ -694,11 +749,12 @@ function importCbndDialog() {
     try {
       const result = parseCBND(ab);
       const n = applyCbndImport(result, name);
+      const oor = importRangeNote();
       if (result.loop && result.loop.enabled) {
         S.selected = 0;
-        setMsg('已从 .cbnd 导入 ' + n + ' 个音符（含循环标记，起点 ' + (result.loop.startTick + 1) + '）');
+        setMsg('已从 .cbnd 导入 ' + n + ' 个音符（含循环标记，起点 ' + (result.loop.startTick + 1) + '）' + oor);
       } else {
-        setMsg('已从 .cbnd 导入 ' + n + ' 个音符');
+        setMsg('已从 .cbnd 导入 ' + n + ' 个音符' + oor);
       }
     } catch (e) {
       messageDialog('导入 .cbnd 失败：\n' + e.message, '错误');

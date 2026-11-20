@@ -19,9 +19,9 @@ function openFileMenu(x, y) {
     iconPrefix(ICON.SAVE_AS) + '另存为...|保存选项......|-|' +
     (S.selected !== 0 ? '^!' : '') + '导入片段......|' +
     (S.selected === 0 ? '^!' : '') + '导出片段......|' +
-    '从 MIDI 文件导入......|-|' +
+    '从 MIDI 文件导入......|MIDI 输入设备......|-|' +
     '从 CBND 导入......|从指令文本导入......|-|' +
-    '导出为数据包......|导出为 schematic......|-|' +
+    '导出为数据包......|导出为 schematic......|导出为音频（WAV）......|-|' +
     '关于本作品......';
   showMenu('file', x, y, s);
 }
@@ -226,9 +226,19 @@ function menuAction(menu, label, idx, spos, target) {
     });
     else if (label === '导出片段......') { if (S.selected) downloadBytes(buildPattern(), (S.song_name || 'pattern') + '.nbp'); }
     else if (label === '从 MIDI 文件导入......') pickFile('.mid,.midi', (ab, n) => { try { importMidi(ab, n); } catch (e) { messageDialog(e.message, '错误'); } });
+    else if (label === 'MIDI 输入设备......') openMidiDevice();
     // cbnote 的两种格式：.cbnd 位流 与 指令 .txt。实现在 js/cbnd.js
     else if (label === '从 CBND 导入......') importCbndDialog();
     else if (label === '从指令文本导入......') importCommandTextDialog();
+    /* 音频渲染导出：OfflineAudioContext 一次性算完再编码成 WAV。
+       实现在 js/render.js。渲染期间要连点保护（重复点击会并发渲染）。 */
+    else if (label === '导出为音频（WAV）......') {
+      if (S.rendering) { setMsg('正在渲染，请稍候...'); return; }
+      S.rendering = 1;
+      exportSongAudio(S.song_name || S.filename)
+        .catch((e) => messageDialog('导出音频失败：\n' + e.message, '错误'))
+        .then(() => { S.rendering = 0; });
+    }
     else if (label === '导出为数据包......') {
       // 对照 menu_click.gml：window = w_datapack_export
       S.playing = 0; S.window = W_DATAPACK_EXPORT;
@@ -1608,16 +1618,96 @@ function drawTempoTapper() {
   setFont(FONT.main());
   okCancel(f, () => closeWindow(), '确定');
 }
+/* MIDI 设备管理器。实现在 js/mididevice.js（Web MIDI API）。
+   打开时尝试获取权限；不支持或拒绝授权时显示具体原因，
+   而不是笼统地说「暂不支持」。 */
+function openMidiDevice() {
+  S.playing = 0;
+  S.window = W_MIDIDEVICES;
+  MIDI_DEV.initTried = false;
+  // 进入窗口就请求一次权限（用户手势内，Chrome 才允许弹权限框）
+  midiInit(onMidiNote).then((ok) => {
+    MIDI_DEV.initTried = true;
+    if (!ok) MIDI_DEV.enabled = false;
+  });
+}
+
+/* 收到 MIDI 音符：
+   始终试听（让玩家边弹边听），并可选写入当前光标所在的音符块。 */
+function onMidiNote(note, velocity, isOn) {
+  if (!isOn) return;
+  const key = midiNoteToKey(note);
+  const ins = INSTRUMENTS[S.instrument] || INSTRUMENTS[0];
+  if (!ins) return;
+  // 试听：直接用当前乐器发声（音高按 key 计算，与编辑器内一致）
+  if (ins.loaded) playSound(ins, key, velocity || 100, 100, 0);
+  // 录入：在光标格写入音符
+  if (MIDI_DEV.record && S.selbx >= 0 && S.selby >= 0) {
+    changeBlockManual(S.selbx, S.selby, insIndex(ins), key, velocity || 100, 100, 0);
+    S.changed = 1;
+    // 写完往后走一格，方便连续录入
+    if (MIDI_DEV.recordAdvance) S.selbx++;
+  }
+}
+
 function drawMidiDevices() {
-  const f = macroDialogBase(380, 220, 'MIDI 设备管理器');
+  const f = macroDialogBase(460, 300, 'MIDI 设备管理器');
   setFont(FONT.main());
   setColor(C.text);
-  text(f.x1 + 16, f.y1 + 46, '浏览器暂不支持直接读取 MIDI 输入设备。');
-  setFont(FONT.small());
-  setColor(C.textDim);
-  text(f.x1 + 16, f.y1 + 70, '你可以用「从 MIDI 文件导入」把 .mid 文件转换成音符。');
+
+  let y = f.y1 + 48;
+  const lh = 22;
+
+  if (!MIDI_DEV.initTried) {
+    setColor(C.textDim);
+    text(f.x1 + 16, y, '正在请求 MIDI 权限...');
+  } else if (!MIDI_DEV.enabled) {
+    // 不支持或拒绝授权：把具体原因分行显示
+    setColor(C.text);
+    const lines = (MIDI_DEV.lastError || '无法启用 MIDI 输入。').split('\n');
+    for (const ln of lines) { text(f.x1 + 16, y, ln); y += lh; }
+    y += 6;
+    setColor(C.textDim);
+    text(f.x1 + 16, y, '你仍可以用「从 MIDI 文件导入」把 .mid 文件转换成音符。');
+  } else {
+    // 已启用：列出输入端口
+    setColor(C.textDim);
+    text(f.x1 + 16, y, '已连接的输入设备：'); y += lh;
+    setColor(C.text);
+    if (!MIDI_DEV.inputs.length) {
+      text(f.x1 + 28, y, '（没有检测到设备，请先连接 MIDI 键盘）'); y += lh;
+    } else {
+      for (const p of MIDI_DEV.inputs) {
+        const nm = (p.name || '未命名设备') + (p.manufacturer ? '（' + p.manufacturer + '）' : '');
+        text(f.x1 + 28, y, '· ' + nm); y += lh;
+      }
+    }
+    y += 8;
+    setFont(FONT.small());
+    setColor(C.textDim);
+    text(f.x1 + 16, y, '用键盘弹奏会实时发声。勾选下面两项可在光标处写入音符块。'); y += lh;
+
+    setFont(FONT.main());
+    if (drawCheckbox(f.x1 + 16, y, !!S.midiRecord, '录入到光标格', false)) {
+      S.midiRecord = S.midiRecord ? 0 : 1;
+      saveSettings();
+    }
+    MIDI_DEV.record = !!S.midiRecord;
+    y += lh;
+    if (S.midiRecord) {
+      if (drawCheckbox(f.x1 + 32, y, !!S.midiRecordAdvance, '每写一个音后光标右移一格（连续录入）', false)) {
+        S.midiRecordAdvance = S.midiRecordAdvance ? 0 : 1;
+        saveSettings();
+      }
+      MIDI_DEV.recordAdvance = !!S.midiRecordAdvance;
+    }
+  }
+
   setFont(FONT.main());
-  if (button2(f.x2 - 76, f.y2 - 34, 64, '关闭') || G.keysPressed['Escape']) closeWindow();
+  if (button2(f.x2 - 76, f.y2 - 34, 64, '关闭') || G.keysPressed['Escape']) {
+    if (MIDI_DEV.enabled) midiStop();
+    closeWindow();
+  }
 }
 function drawTempoInput() {
   const f = dialogFrame(240, 130);

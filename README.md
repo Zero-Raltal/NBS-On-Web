@@ -41,7 +41,9 @@ src/js/macros.js        宏（对应 macro_*）
 src/js/audio.js         Web Audio 播放引擎
 src/js/nbs.js           .nbs / .nbp 读写
 src/js/midi.js          MIDI 解析与导入
+src/js/mididevice.js    Web MIDI 输入设备（实时弹奏 / 录入）
 src/js/cbnd.js          cbnote 的 .cbnd / 指令 txt 导入
+src/js/render.js        音频离线渲染导出（WAV）
 src/js/schematic.js     schematic / 数据包导出（对应 export_schematic_*）
 src/js/ui.js            控件库、菜单、消息框
 src/js/editor.js        主编辑器绘制与交互（对应 control_draw）
@@ -82,10 +84,12 @@ src/assets/sounds       原版音色（运行时使用）
 - `.nbs` 读取（v0–v5，含自定义音色、层名、层锁定/音量/声道）与写出（可选 v1–v5）
 - `.nbp` 片段导入导出、最近歌曲（浏览器本地缓存，可直接重新打开）
 - MIDI 导入（SMF 0/1，轨道勾选、音色指配、力度映射、PPQ 换算、BPM→t/s 保留两位小数）
+- **MIDI 输入设备**：接 USB MIDI 键盘直接弹奏试听，可选用在光标处录入音符（支持连续录入）
 - **从 cbnote 的 `.cbnd` 导入**（位流格式：4b 乐器 + 7b 音高 + 16b tick+1，含循环标记）
 - **从指令 `.txt` 导入**：解析 `execute … run playsound …` 反推音符（音色、音高、音量、刻位）
 - **schematic（.schem）导出**：直轨/环线/分支布局、中继器充能时序、矿车轨道
 - **数据包（datapack）导出**：逐音符函数文件、`pack.mcmeta`、版本选择
+- **音频渲染导出（WAV）**：用 `OfflineAudioContext` 离线渲染整首歌，16 位 PCM 立体声
 - 拖放文件打开
 
 **对话框**：歌曲信息、歌曲属性、歌曲数据、音色设置（可上传自定义音频作为音色）、首选项（5 个分页：通用/界面/外观/访问/播放，与原版同构）、保存选项、MIDI 导入、速度测量器、关于，以及全部宏参数窗口
@@ -155,7 +159,8 @@ src/assets/sounds       原版音色（运行时使用）
 解析规则：
 
 - 音色取 `playsound` 后的第一个参数，`note.harp` / `minecraft:block.note_block.harp` 均可
-- 音高 `pitch` 反解为音高值：`key = 54 + 12 × log₂(pitch)`（与项链方块 C4 = 1.0 的约定一致）
+- 音高 `pitch` 反解：`key = 54 + 12 × log₂(pitch)`，得到的是 **cbnote / Minecraft 的编号**，
+  还需**减去 9** 才是本编辑器的 key（见下方「key 编号换算」）
 - 刻位支持两种写法：
   - 显式刻 `execute as @a[scores={t=5}]` → 第 4 刻
   - 取反式 `execute as @a[scores={t=-1..}] … unless entity @s[scores={t=!1,t=!3}]` → 第 0、2 刻
@@ -164,6 +169,28 @@ src/assets/sounds       原版音色（运行时使用）
 - **速度无法从 txt 还原**（指令按刻编号，每刻实际时长取决于循环装置），
   导入后按 **20 t/s** 处理 —— 这是「不设延迟的循环命令方块」的速度（游戏刻固定 20 Hz），
   也是这类 txt 最常见的生成方式。若要别的速度，导入后在左上角速度框调整即可
+
+### key 编号换算（重要）
+
+cbnote / Minecraft 与本编辑器用的是**两套不同的 key 编号**，直接混用会整体高 9 个半音：
+
+| | 公式 | 1.0 播放速率对应的 key | 该 key 的音名 |
+|---|---|---|---|
+| cbnote / Minecraft | `pitch = 2^((key−54)/12)` | **54** | F#4 |
+| 本编辑器（NBS 语义） | `rate = 0.5 × 2^((key + ins.key − 78)/12)`，`ins.key = 45` | **45** | F#4 |
+
+两者指向同一个音（F#4），但编号相差 **9**。所以两侧换算关系是：
+
+```
+本编辑器 key = cbnote key − 9
+cbnote key   = 本编辑器 key + 9
+```
+
+`.cbnd` 与指令 `.txt` 两条导入路径都会做这个换算。换算后若超出本编辑器的音域
+（0–87），会被夹到最近的端点，并提示「有 N 个音超出音域」。
+
+> 这一条是修 bug 时补上的：此前按「两侧都以 C4 = 54 为 1.0」的错误假设直接沿用编号，
+> 导致导入后音高整体偏高一个小六度，与 cbnote 和游戏内都不一致。
 
 ## 与源码的有意差异
 
@@ -176,9 +203,14 @@ src/assets/sounds       原版音色（运行时使用）
 
 ## 已知缺口
 
-- MIDI 输入设备（Web MIDI）未接入，只支持文件导入。
-- 音频导出（MP3/WAV 渲染）未实现。
-- schematic / 数据包导出已实现，但仅在 NBT 结构与 zip CRC 层面验证过，**未在真实 Minecraft 中加载测试**。
+- 音频导出目前只支持 WAV（16 位 PCM 立体声）。MP3 / OGG 需要额外的编码器，未接入。
+- MIDI 输入设备依赖浏览器 Web MIDI API：Chrome / Edge 支持，Firefox / Safari 默认不支持；
+  且必须通过 http(s) 打开（`file://` 无法授予 MIDI 权限），所以单文件版直接双击打开时该功能不可用。
+
+## 已在游戏内验证
+
+- **schematic / 结构导出**：已在 Minecraft 中实际加载测试，音符方块与红石布线均可正常播放。
+- **数据包导出**：已在 Minecraft 中实际加载测试，`execute … run playsound` 指令链可正常发声。
 
 ## 单文件版是怎么做的
 

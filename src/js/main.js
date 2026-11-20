@@ -65,6 +65,8 @@ const SETTINGS_FIELDS = [
   // MIDI 导入选项
   'midiRemember', 'midiRemoveSilent', 'midiNameLayers', 'midiNamePatch',
   'midiTempo', 'midiVel', 'midiOctave',
+  // MIDI 输入设备（实时录入）与音频渲染导出
+  'midiRecord', 'midiRecordAdvance', 'render_samplerate',
   // 「只提示一次」类警告的已确认标记。
   // 对照 load_settings.gml:173-175 / save_settings.gml:168-170，原版把这三个
   // 存在 ini 的 [warnings] 段里（octaves / instrument / schematics），
