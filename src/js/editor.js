@@ -483,9 +483,15 @@ function advanceByAudioClock() {
 
   if (typeof S.play_anchor_time !== 'number' || drift > 0.5) {
     setPlayAnchor(S.marker_pos);
-    // 位置被外部挪动（拖动标记/点时间轴/按 Home），排期游标要跟过去，
-    // 否则 scheduleAhead 会从旧位置继续补排，把已经过去的列又播一遍
-    S.sched_col = floor(S.marker_pos);
+    /* 位置被外部挪动（拖动标记/点时间轴/按 Home），排期游标要跟过去，
+       否则 scheduleAhead 会从旧位置继续补排，把已经过去的列又播一遍。
+       【但游标绝不能回退】——密集变速的段落里（Rush E 有 180 个变速事件，
+       相邻速度差可达 7 倍）drift 会频繁超过 0.5，每次都把游标拽回
+       floor(marker_pos) 就等于把已经播过的列重新排期：
+       听感正是"卡在某个变速标记上、同一 tick 的音以极快速度反复响"。
+       只有"位置确实向后挪了"（用户在拖标记）才允许回退。 */
+    const target = floor(S.marker_pos);
+    if (target > S.sched_col) S.sched_col = target;
   }
   const el = Math.max(0, AU.ctx.currentTime - S.play_anchor_time);
   S.marker_pos = S.play_anchor_pos + el * S.tempo;
@@ -636,9 +642,18 @@ function scheduleAhead() {
   let guard = 0;
   while (S.sched_col <= S.enda && guard++ < 512) {
     const col = S.sched_col;
-    /* 用新速度换算每一列的真实发声时刻：锚点是"此刻 @ 新速度"，
-       所以 col 相对锚点位置的差值除以新速度即可。 */
-    const when = S.play_anchor_time + (col - S.play_anchor_pos) / tempo;
+    /* 【每一轮都必须重新读锚点与速度】
+       原来 tempo / anchor 只在循环外读一次，可是变速列（下面的 hasTempo 分支）
+       会在循环【内部】改写 S.play_anchor_pos / _time / _tempo 与 S.tempo。
+       于是后面的列拿着"新锚点 + 旧速度"算 when，算出来远小于 now，
+       被判定"早就该响"，一连串列被瞬间排空 —— 第 128 列
+       （Rush E 里 462BPM→64BPM 的骤降点）之后 sched 从 128 直接跳到 132，
+       中间三列根本没播。用户听到的就是"卡在那个标记上疯狂重复"。
+       · 位置用【锚点速度】推进：锚点记的是这段区间的真实斜率，读 S.tempo 会在
+         交接帧算出偏移，导致游标前跳/后退。
+       · when 也要用锚点速度换算成真实时刻。 */
+    const anchorTempo = Math.max(0.25, S.play_anchor_tempo || S.tempo);
+    const when = S.play_anchor_time + (col - S.play_anchor_pos) / anchorTempo;
     if (when > horizon) break;
 
     /* Tempo Changer 会改变播放速度，提前排期会让变速提前生效。
@@ -670,17 +685,30 @@ function scheduleAhead() {
          正确做法是先按【旧速度】把位置外推到 now 得到精确的当前列位置，
          再用【新速度】以那个位置为起点重锚。 */
       if (when <= now + 0.02) {
-        /* 先把时间轴推进到此刻（此时 S.tempo 还是旧值，符合"到这一列之前按旧速度"） */
-        const posNow = S.play_anchor_pos + (now - S.play_anchor_time) * Math.max(0.25, S.play_anchor_tempo || tempo);
+        /* 先把时间轴按【旧速度】推进到此刻，得到这一列的精确起始位置。
+           注意 upper bound 要夹到 col，不能让 posNow 越过这一列 ——
+           否则变速方块所在的列会被算到"已经过去"，画面和声音都会跳。 */
+        const posNow = S.play_anchor_pos + (now - S.play_anchor_time) * anchorTempo;
         playColumnRange(col, col);          // ← 这一列会把 S.tempo 改成新值
         S.sched_col = col + 1;
-        /* 用新速度、以"此刻所在的精确位置"为起点重锚。
-           posNow 可能略小于 col+1（还没完全走到下一列），这正是我们要的：
-           剩下的零头会在新速度下继续走完。 */
-        S.play_anchor_pos = Math.max(posNow, col);
+        /* 【重锚：位置绝不能向前拉】
+           原来写 Math.max(posNow, col) —— 这会把锚点位置强行推到 col。
+           遇到"速度骤降"的段落（Rush E 里 x=126 处 462BPM、x=128 处 64BPM，
+           相邻速度差 7 倍）时，posNow 往往略小于 col（还没走完这一列的零头），
+           被推到 col 之后相当于【凭空吞掉一部分时间】，
+           而 scheduleAhead 下一帧又按新速度从 col 继续推进 ——
+           两边的位置口径打架，游标反复回退/重排，
+           表现就是用户说的"卡在某个变速标记上、同一 tick 的音以极快速度重复播放"。
+           正确做法：位置只取按时间真实外推出的 posNow，绝不 max 到 col。
+           若 posNow 因浮点误差略大于 col+1，也只夹到 col+1 为止。 */
+        const anchorPos = Math.min(posNow, col + 1);
+        S.play_anchor_pos = anchorPos;
         S.play_anchor_time = now;
         S.play_anchor_tempo = Math.max(0.25, S.tempo);
-        S.play_anchor_expected = S.play_anchor_pos;
+        S.play_anchor_expected = anchorPos;
+        /* 播放位置也要跟锚点对齐，否则 marker_pos 与 anchor_pos 的口径不一致，
+           advanceByAudioClock 里的 drift 判定会被反复触发。 */
+        S.marker_pos = anchorPos;
         continue;
       }
       break;
