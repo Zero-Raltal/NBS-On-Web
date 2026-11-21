@@ -229,6 +229,36 @@
   "h": 2,
   "frames": 40
  },
+ "spr_inputbox_n_left": {
+  "w": 2,
+  "h": 21,
+  "frames": 5
+ },
+ "spr_inputbox_n_middle": {
+  "w": 1,
+  "h": 21,
+  "frames": 5
+ },
+ "spr_inputbox_n_right": {
+  "w": 2,
+  "h": 21,
+  "frames": 5
+ },
+ "spr_inputbox_s_left": {
+  "w": 2,
+  "h": 21,
+  "frames": 4
+ },
+ "spr_inputbox_s_middle": {
+  "w": 1,
+  "h": 21,
+  "frames": 4
+ },
+ "spr_inputbox_s_right": {
+  "w": 2,
+  "h": 21,
+  "frames": 4
+ },
  "spr_tabbuttons": {
   "w": 2,
   "h": 21,

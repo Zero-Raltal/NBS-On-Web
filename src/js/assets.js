@@ -37,6 +37,10 @@ const ATLAS_SETS = [
        每帧再加 8*theme（经典/复古/暗黑三套），Fluent 深色再 +8。
      Fluent 则走手绘圆角 + spr_shadow（这里用 canvas 阴影等价实现）。 */
   'spr_interface2',
+  /* 非 Fluent 主题的三片式输入框（draw_inputbox.gml:33）。
+     n = 普通态, s = 聚焦态；帧号 = theme，一个 sprite 里装了四套主题的样式。 */
+  'spr_inputbox_n_left', 'spr_inputbox_n_middle', 'spr_inputbox_n_right',
+  'spr_inputbox_s_left', 'spr_inputbox_s_middle', 'spr_inputbox_s_right',
   'spr_tabbuttons', 'spr_tabsel', 'spr_yesno_f', 'spr_logo', 'spr_bigicons_f',
   'spr_block_shape', 'spr_block_color_shape', 'spr_frame4',
   // 滚动条（原版 spr_scrollbar_* 全套）

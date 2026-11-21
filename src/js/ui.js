@@ -99,13 +99,33 @@ function textEdit(id, str, x, y, w, h) {
   return val;
 }
 function inputBox(id, str, x, y, w, h) {
+  /* 对照 draw_inputbox.gml:33 —— 非 Fluent 主题的输入框是三片式 sprite：
+       spr_inputbox_n_left  (帧 = theme)
+       spr_inputbox_n_middle(横向拉伸)
+       spr_inputbox_n_right (帧 = theme)
+     "_n_" 表示普通态，"_s_" 是选中/聚焦态。
+     Fluent（theme 3）走手绘圆角（draw_inputbox.gml:39 用 3 + fdark 的 hires 版）。
+     之前不分主题一律画 Fluent 圆角，所以经典/复古/暗黑下的输入框都不对。 */
   const c = G.ctx;
+  if (S.theme !== 3) {
+    /* spr_inputbox_n_* 有 5 帧（含 Fluent 深色），s_* 只有 4 帧（只到 theme 3）。
+       这里 theme 最多到 2，都在范围内，但保留 clamp 以防将来加主题时越界。 */
+    const sel = (UI.textFocus === id) ? 's' : 'n';
+    const maxF = G.atlas['spr_inputbox_' + sel + '_left']
+      ? G.atlas['spr_inputbox_' + sel + '_left'].frames - 1 : 0;
+    const fr = Math.min(S.theme, maxF);
+    drawSprite('spr_inputbox_' + sel + '_left', fr, x, y);
+    drawSprite('spr_inputbox_' + sel + '_middle', fr, x + 3, y, (w - 6) / 3, 1);
+    drawSprite('spr_inputbox_' + sel + '_right', fr, x + w - 3, y);
+    return textEdit(id, str, x + 6, y + 4, w - 12, h - 6);
+  }
   setColor(C.controlBg);
   roundRect(x, y, x + w, y + h, 4, true);
   setColor(UI.textFocus === id ? C.accent : C.controlBorder);
   roundRect(x + 0.5, y + 0.5, x + w - 0.5, y + h - 0.5, 4, false);
   return textEdit(id, str, x + 6, y + 4, w - 12, h - 6);
 }
+
 
 /* ============================== 基础控件 ================================= */
 /* 对照 draw_window.gml:5-44 —— 窗口样式是【分主题】的：
@@ -234,32 +254,36 @@ function drawCheckbox(x, y, state, label, locked) {
   const w = 13 + textWidth(label) + 8;
   const hover = !locked && mouseRectangle(x, y, w, 13);
   const c = G.ctx;
-  /* 对照 draw_checkbox.gml:21/54 —— 分支条件是 `theme != 3` 对 `theme == 3`：
-       非 Fluent（经典 0 / 复古 1 / 暗黑 2）→ spr_checkbox 精灵（方框/打勾位图）
+  /* 对照 draw_checkbox.gml:21-58 —— 分支条件是 `theme != 3` 对 `theme == 3`：
+       非 Fluent（经典 0 / 复古 1 / 暗黑 2）→ spr_checkbox 位图（自带配色与浮雕）
        Fluent（3）                          → 手绘圆角复选框
-     之前这里写的是 `S.theme === 1`，只把「复古」当成 90s 方框，
-     于是【暗黑主题】掉进了 Fluent 分支 —— 暗黑下勾选框长成 Fluent 的圆角样式，
-     这正是用户说的「不同主题风格混用」。 */
+     之前这里写 `S.theme === 1`，只把「复古」当成 90s 方框，
+     【暗黑主题】因此掉进 Fluent 分支 —— 这就是「不同主题风格混用」。
+     后来把判断改对了，却仍用手绘方框（setColor + fillRect）去"仿"位图：
+     仿不出浮雕细节，暗黑底色也只能靠猜。原版这里本来就是 sprite，
+     所以现在直接画 spr_checkbox。
+
+     spr_checkbox 是 13x13、30 帧 = 5 组 × 6 帧，组内含义：
+       0/1/2 = 未勾选（普通 / 悬停 / 按下）
+       3     = 勾选标记（叠在 0/1/2 之上）
+       4/5   = 禁用（未勾选 / 已勾选）
+     组偏移 = 6*theme + 6*(fdark && theme==3)。 */
   const isSprite = S.theme !== 3;
   if (isSprite) {
-    // 对照 draw_checkbox.gml:31：theme 2/1 走「方框」分支（spr_checkbox 的方格样式），
-    // 而不是 Fluent 的圆角复选框。白底 + 右下暗边 + 左上亮边，勾选后画黑勾。
-    // 暗黑主题（2）的底色要用深色版本，否则白底在深色面板上非常刺眼。
-    const darkBox = (S.theme === 2);
-    setColor(locked ? (darkBox ? '#3a3a3a' : '#c8c4bc') : (darkBox ? '#1e1e1e' : '#ffffff'));
-    fillRect(x, y, 12, 12);
-    setColor(THEME90.lo);
-    fillRect(x, y + 11, 12, 1); fillRect(x + 11, y, 1, 12);
-    setColor(THEME90.hi);
-    fillRect(x, y, 12, 1); fillRect(x, y, 1, 12);
-    if (state) {
-      c.strokeStyle = locked ? '#808080' : (darkBox ? '#ffffff' : '#000000');
-      c.lineWidth = 1.6;
-      c.beginPath();
-      c.moveTo(x + 2.5, y + 6); c.lineTo(x + 5, y + 9); c.lineTo(x + 10, y + 3.2);
-      c.stroke();
+    const group = 6 * S.theme + ((S.theme === 3 && S.fdark) ? 6 : 0);
+    if (locked) {
+      drawSprite('spr_checkbox', 4 + (state ? 1 : 0) + group, x, y);
+    } else {
+      const m = hover ? (G.mb[0] ? 2 : 1) : 0;
+      drawSprite('spr_checkbox', m + group, x, y);
+      /* 勾选标记单独叠一层。对照 draw_checkbox.gml:54 的 alpha 算式：
+           accent[5 + 2*(m==1) + 3*(m==2)] * (theme==3) - !(theme==3)
+         非 Fluent 时前项乘 0、后项减 1 → 结果 -1，即「不着色，用位图原色」。 */
+      if (state) drawSprite('spr_checkbox', 3 + group, x, y);
     }
-    setColor(locked ? THEME90.textLock : (darkBox ? '#ffffff' : '#000000'));
+    /* 文字色：对照 draw_checkbox.gml:31-36 —— 默认 204,204,204，
+       theme 2 或 1 时改白字。 */
+    setColor((S.theme === 1 || S.theme === 2) ? '#ffffff' : '#cccccc');
   } else {
     // Fluent 普通复选框，严格照 draw_checkbox.gml:142-182 的顺序：
     //   ① 填充：勾选 → accent[5 + 2*(m==1) + 3*(m==2)]
@@ -306,25 +330,28 @@ function drawRadiobox(x, y, state, label, locked) {
   const w = 13 + textWidth(label) + 8;
   const hover = !locked && mouseRectangle(x, y, w, 13);
   const c = G.ctx;
-  /* 同样是 `theme != 3` 对 `theme == 3`（对照 draw_radiobox.gml:17）：
-     经典/复古/暗黑走位图方框分支，只有 Fluent 手绘。
-     之前写成 theme === 1，暗黑主题的单选框因此落进了 Fluent 分支。 */
+  /* 同样是 `theme != 3` 对 `theme == 3`（对照 draw_radiobox.gml:17/22）：
+     经典/复古/暗黑走 spr_radiobox 位图，只有 Fluent 手绘。
+     之前写成 theme === 1，暗黑主题的单选框因此落进了 Fluent 分支。
+     后来判断改对了，但仍用手绘圆去"仿"位图，这里改为直接用 sprite。
+
+     spr_radiobox 是 12x12、30 帧 = 5 组 × 6 帧，组内：
+       0/1/2 = 未选中（普通 / 悬停 / 按下）
+       3     = 选中标记（叠在 0/1/2 之上，accent[5]*(theme==3) - !(theme==3)）
+       4/5   = 禁用（未选中 / 已选中）
+     组偏移 = 6*theme + 6*(theme==3 && fdark)。 */
   const isSprite = S.theme !== 3;
   if (isSprite) {
-    // 对照 draw_radiobox.gml:17：theme 2/1 用 spr_radiobox 的方形/点阵样式。
-    // 90s 主题下是「圆圈 + 内点」，边框同样是亮左上 / 暗右下。
-    const darkBox = (S.theme === 2);
-    setColor(darkBox ? '#1e1e1e' : '#ffffff');
-    c.beginPath(); c.arc(x + 6, y + 6, 6, 0, Math.PI * 2); c.fill();
-    c.strokeStyle = THEME90.lo; c.lineWidth = 1;
-    c.beginPath(); c.arc(x + 6.5, y + 6.5, 5.5, 0, Math.PI * 2); c.stroke();
-    c.strokeStyle = THEME90.hi;
-    c.beginPath(); c.arc(x + 5.5, y + 5.5, 5.5, 0, Math.PI * 2); c.stroke();
-    if (state) {
-      setColor(darkBox ? '#ffffff' : '#000000');
-      c.beginPath(); c.arc(x + 6, y + 6, 2.5, 0, Math.PI * 2); c.fill();
+    const group = 6 * S.theme + ((S.theme === 3 && S.fdark) ? 6 : 0);
+    if (locked) {
+      drawSprite('spr_radiobox', 4 + (state ? 1 : 0) + group, x, y);
+    } else {
+      const m = hover ? (G.mb[0] ? 2 : 1) : 0;
+      drawSprite('spr_radiobox', m + group, x, y);
+      // 选中标记：非 Fluent 时 alpha 算式结果为 -1，即用位图原色
+      if (state) drawSprite('spr_radiobox', 3 + group, x, y);
     }
-    setColor(locked ? THEME90.textLock : (darkBox ? '#ffffff' : '#000000'));
+    setColor((S.theme === 1 || S.theme === 2) ? '#ffffff' : '#cccccc');
   } else {
     setColor(C.controlBg);
     c.beginPath(); c.arc(x + 6, y + 6, 6, 0, Math.PI * 2); c.fill();

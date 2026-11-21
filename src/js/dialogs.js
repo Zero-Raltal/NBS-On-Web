@@ -865,18 +865,20 @@ function drawInstruments() {
 
 /* 音调列的下拉箭头（对应 draw_abutton） */
 function drawArrowButton(x, y, disabled) {
-  const pressed = mouseRectangle(x, y, 16, 18) && G.mb[0];
+  /* 对照 draw_abutton.gml:5-10 —— 这是 sprite，不是手绘三角形：
+       m = 悬停（未锁定）; m += 按下 → 2
+       帧 = m + 3*theme + 3*(fdark && theme==3)
+     spr_button_arrow 是 15 帧 = 5 组 × 3（普通/悬停/按下），主题偏移 3。
+     之前用 fillRect 拼了个三角形出来，所以所有主题下箭头都是同一种样子。 */
+  const m = (!disabled && mouseRectangle(x, y, 17, 18)) ? (G.mb[0] ? 2 : 1) : 0;
+  const group = 3 * S.theme + ((S.theme === 3 && S.fdark) ? 3 : 0);
   setAlpha(disabled ? 0.4 : 1);
-  setColor(C.controlBg);
-  fillRect(x, y, 16, 18);
-  setColor(C.controlBorder);
-  fillRect(x, y, 16, 1); fillRect(x, y + 17, 16, 1);
-  fillRect(x, y, 1, 18); fillRect(x + 15, y, 1, 18);
-  setColor(C.text);
-  const cx = x + 8, cy = y + 8 + (pressed ? 1 : 0);
-  for (let i = 0; i < 4; i++) fillRect(cx - 3 + i, cy + i, 7 - 2 * i, 1);
+  drawSprite('spr_button_arrow', m + group, x, y);
   setAlpha(1);
+  if (disabled) return false;
+  return m > 0 && G.mbr[0];
 }
+
 
 /* 「显示」列下拉：对应 show_menu_ext("instruments_press", ...)
    源码是 check(ins.press) + "Yes|" + check(!ins.press) + "No" */

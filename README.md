@@ -589,7 +589,7 @@ theme 3 用 `spr_layericons_f` 双层（基帧 + accent 上色层）。
 | 位置 | 问题 | 修法 |
 |---|---|---|
 | `drawButton` | 只有复古走浮雕，经典/暗黑用 Fluent 圆角 | 改 `theme != 3`，并补入 `spr_button`（72 帧，`12*theme` 偏移） |
-| `drawCheckbox` / `drawRadiobox` | 同样只判 `theme === 1` | 改 `theme != 3`，暗黑用深色方框 |
+| `drawCheckbox` / `drawRadiobox` | 只判 `theme === 1`，且用 `fillRect` 手绘仿位图 | 改 `theme != 3`，直接用 `spr_checkbox` / `spr_radiobox`（`6*theme` 分组） |
 | `drawSwitch` | 不分主题一律手绘胶囊 | 非 Fluent 用 `spr_switch` |
 | 音量/立体声指示器 | 一律用 `_f` 版 | 补入 `spr_volume`/`spr_stereo`，非 Fluent 用它们 |
 | `drawMacroBar` | 没画底板；`hover ? 15 : 0` 三元两边相同；漏 alpha 与颜色 | 按 `draw_macroicon.gml` 重写 |
@@ -599,12 +599,17 @@ theme 3 用 `spr_layericons_f` 双层（基帧 + accent 上色层）。
 | 顶栏标签页 | 用 Fluent 圆角块顶替 | 补入 `spr_tabframe`（三片式，`+6*theme`） |
 | 速度框 / 小节框 | 手绘 Fluent 圆角白框 | 补入 `spr_tempobox`（3 种框型 × 浅/深） |
 | `drawWindow`（对话框） | 不分主题一律圆角 8 + 阴影 | 非 Fluent 直角 + `spr_interface2` 八帧拼边框 |
+| `drawArrowButton` | 用 `fillRect` 拼三角形 | 补入 `spr_button_arrow`（`m + 3*theme`） |
+| `inputBox`（输入框） | 不分主题一律 Fluent 圆角 | 非 Fluent 用 `spr_inputbox_*` 三片式（帧 = `theme`） |
 
 **根因是素材缺失**：`spr_volume`、`spr_stereo`、`spr_button`、`spr_frame1`、
-`spr_tempobox`、`spr_tabframe`、`spr_interface2` 当时大多没打进图集
+`spr_tempobox`、`spr_tabframe`、`spr_interface2`、`spr_inputbox_*`、
+`spr_button_arrow`、`spr_checkbox`、`spr_radiobox` 当时大多没打进图集
 （`ATLAS_SETS` 里没有），缺素材就只能用代码手绘 Fluent 等价物，
-于是"图标混用"无法避免。补进 `assets.js` 的 `ATLAS_SETS` 后由
-`tools/build-atlas.py` 重新生成图集即可（64 → 67 张 PNG）。
+于是"图标混用"无法避免。后来几轮里 `spr_checkbox`/`spr_radiobox` 虽然已在图集，
+代码却仍是手绘版 —— **素材打包了不等于用上了**，这两件事要分别核对。
+补进 `assets.js` 的 `ATLAS_SETS` 后由 `tools/build-atlas.py` 重新生成图集即可
+（64 → 74 张 PNG）。
 
 帧号规律可以用一句话记住：**主题偏移是 `N * theme`，Fluent 深色在
 `theme == 3` 时再加一个 `N`**。所以：
@@ -614,11 +619,15 @@ theme 3 用 `spr_layericons_f` 双层（基帧 + accent 上色层）。
 | `spr_frame1`（顶栏底板） | `a + 3*theme` | `a + 9` | `a + 12` |
 | `spr_tabframe`（标签页） | `3k + 6*theme` | `3k + 18` | `3k + 24` |
 | `spr_interface2`（窗口边框） | `i + 8*theme` | 不用 | 不用 |
+| `spr_button_arrow`（箭头） | `m + 3*theme` | `m + 9` | 不用 |
+| `spr_checkbox` / `spr_radiobox` | `m + 6*theme` | 手绘 | 手绘 |
 | `spr_tempobox` | `0` 或 `1` | `2` 或 `3` | `4` 或 `5` |
+| `spr_inputbox_*` | `theme`（单帧） | 手绘 | 手绘 |
 | `spr_button` | `m*3 + 12*theme` | 手绘 | 手绘 |
 
 注意 `spr_tempobox` 只有 6 帧，它的"主题"只有两档（非 Fluent / Fluent），
 不是四档 —— 这类帧数少的 sprite 要按实际帧数反推分组，别硬套 `*theme`。
+同理 `spr_inputbox_s_*` 只有 4 帧（比 `n_*` 少一帧），所以索引要 clamp。
 
 菜单那两条竖线值得单说：`menu_draw.gml:44-49` 在图标区与文字区之间画
 **两条** 1px 线（强调色 @0.25 + 白色），形成一道浅刻痕。少了它，
@@ -640,7 +649,30 @@ const frames = [...new Set(log.filter(x => x.name === 'spr_frame1').map(x => x.n
 
 这样能精确验证"哪个主题用了哪套 sprite、帧号落在哪个区间"，
 而不是只能看出"好像有点不一样"。`tmp/themetest.js` 就是按这个思路写的，
-覆盖 5 个主题变体 × 8 类控件。
+覆盖 5 个主题变体 × 10 类控件。
+
+审计时还踩到两个坑，值得记下来：
+
+**一、"素材打包了"不等于"代码用上了"。** `spr_checkbox` 和 `spr_radiobox`
+很早就补进了 `ATLAS_SETS`，图集里确实有，但 `drawCheckbox` 里仍是
+`setColor` + `fillRect` 手绘的方框。所以核对清单不能只看
+「这个 sprite 在不在图集里」，要反过来问：
+**「图集里有这个 sprite，但 `grep drawSprite` 找不到它」** ——
+那几个才是真正的漏网之鱼。这次就是靠这条规律一次揪出
+`spr_frame1`、`spr_tabframe`、`spr_tempobox`、`spr_interface2`、
+`spr_checkbox`、`spr_radiobox`、`spr_button_arrow` 七个。
+
+**二、手绘"仿"位图永远对不齐。** 中间有几轮我把主题判断改对了
+（`theme != 3`），但保留了手绘实现，心想"反正看着差不多"。
+实际差别是：位图里的浮雕高光/阴影是美术一像素一像素画的，
+手绘版只能猜色值（比如暗黑主题的勾选框底色我当时是猜的 `#1e1e1e`）。
+既然源素材就在手边，直接用 sprite 才是唯一正确的做法。
+
+**三、注意 sprite 帧数比主题数少的情况。** `spr_inputbox_s_*` 只有 4 帧、
+`spr_tempobox` 只有 6 帧、`spr_tabsel` 只有 4 帧 —— 它们的"主题维度"
+和四套主题不是一一对应的。硬套 `*theme` 会取到不存在的帧（`frame()` 返回
+null，画面上什么都不显示，而且不报错，很容易漏掉）。正确做法是先读
+`atlas.json` 里的 `frames`，再反推分组。
 
 ## 长歌曲全选被截断
 
