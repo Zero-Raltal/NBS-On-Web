@@ -2288,6 +2288,15 @@ function drawTopBar() {
      S.toolbar_h 把 y1 往下推。写入时机是「画完这一帧」，
      因此下一帧生效 —— resize 后最多滞后一帧就收敛。 */
   const wrapMode = !!S.portrait;
+  /* 对照 control_draw.gml:1560 —— 经典主题（theme == 0）在顶栏下方
+     横向拉一条 spr_tabbar（1x19 的单像素 sprite）作为标签栏与工具条的分隔。
+     只有【经典】有这一条：复古/暗黑有自己的窗口边框层次，Fluent 用留白区分。
+     少了它，经典主题的顶栏和网格之间就少了一道原版有、别的主题没有的界线。 */
+  if (S.theme === 0) {
+    /* 参数顺序是 draw_sprite_ext(sprite, subimg, x, y, xscale, yscale, ...)：
+       横向缩放到 rw、纵向保持 1 —— spr_tabbar 是 1x19，横拉后就是一条横线。 */
+    drawSprite('spr_tabbar', 0, 0, 0, rw, 1);
+  }
   const marginR = 6;
   let rowX = 6, rowY = 23, rowMaxY = 23;
   const advance = (n) => {
