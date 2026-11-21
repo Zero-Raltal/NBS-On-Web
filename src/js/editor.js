@@ -229,9 +229,21 @@ function editorFrame(dt) {
   S.cursmarker = 0;
   handleGlobalKeys();
   handlePlayback(dt);
-  handleTimelineInput();
-  handleGridInput();
-  handlePianoInput();
+  /* 【抽屉打开时彻底跳过下层输入】
+     blocked 只是把 G.mb/G.mbp/G.mbr 清零，但 handleTimelineInput /
+     handleGridInput / handlePianoInput 里还有一批逻辑【不依赖鼠标按钮】：
+       · handleTimelineInput 会读 G.mouse 位置做标记拖动、滚动判定
+       · handleGridInput     会读 S.select / S.drag 这类【跨帧残留状态】
+       · handlePianoInput    会读键盘、并且 G.cursor 判定用的是 mouseRectangle
+     于是抽屉打开时手指在琴键上滑动，仍然会喂给底下的画布逻辑 ——
+     表现为「琴键上滑动会穿透到画布」。清零按钮状态挡不住这一半。
+     所以抽屉打开时直接不进这几个 handler，从根上断掉。 */
+  const drawerIsOpen = (typeof drawerOpen === 'function' && drawerOpen());
+  if (!drawerIsOpen) {
+    handleTimelineInput();
+    handleGridInput();
+    handlePianoInput();
+  }
   drawEditor(dt);
   G.mb = rawMb; G.mbp = rawMbp; G.mbr = rawMbr; G.wheel = rawWheel;
   drawWindows();
@@ -1245,11 +1257,17 @@ function drawEditor(dt) {
   if (S.selected !== 0 && S.show_piano && !S.portrait) drawMacroBar();
 
   // 顶栏
-  drawTopBar();
-  // 底部状态栏
-  drawStatusBar();
-  // 时间/速度信息
-  drawInfoBoxes();
+  /* 全屏时【不画】顶栏和状态栏 —— 这就是"上方各种控件全部飘在画布上"的来源。
+     全屏的本意是让网格铺满整屏，把工具栏留在上面会盖住网格最上面两行；
+     原版 Draw_0.gml:5 里 `if (obj_controller.fullscreen)` 就是整块跳过的。
+     但退出入口不能跟着一起消失，所以下面单独画一个右下角的「返回」按钮。 */
+  if (!S.fullscreen) {
+    drawTopBar();
+    drawStatusBar();
+    drawInfoBoxes();
+  } else {
+    drawFullscreenExit();
+  }
   // 钢琴
   if (!S.fullscreen && (S.show_piano || S.dropmode) && !S.portrait) drawPianoAll();
   // 竖屏抽屉（图层面板 / 琴键 / 属性，都在这一个浮层里）
@@ -1546,6 +1564,48 @@ function drawHScrollbar() {
   if (hov && G.mbr[0]) { S.fullscreen = S.fullscreen ? 0 : 1; setMsg(S.fullscreen ? '全屏模式 => 开启' : '全屏模式 => 关闭'); }
 }
 
+/* 全屏下的「返回」按钮 —— 对照 control_draw.gml:1266-1294。
+ *
+ * 【为什么必须单独有这么一个按钮】
+ *   上面 drawHScrollbar 里那个「展开/返回」按钮是按原版放在滚动条右端的，
+ *   而滚动条整体被 `if (!S.fullscreen)` 跳过了（全屏就是要让网格铺满、
+ *   不要滚动条占位）。结果就是：点了「编辑区域」进入全屏后，
+ *   退出按钮跟着滚动条一起消失 —— 用户被关在全屏里出不来。
+ *   原版对此有专门处理：全屏时把按钮挪到右下角
+ *       xx = rw - sbv_anim;  yy = rh - 16
+ *   并用 spr_layericons 的第 8 帧（返回箭头）。这里照搬。
+ *
+ *   er 为 true 时说明这帧已经画过了 —— 让调用方知道要不要跳过后续的
+ *   状态栏绘制之类，避免按钮被盖住。 */
+function drawFullscreenExit() {
+  if (!S.fullscreen) return;
+  const rw = S.rw, rh = S.rh;
+  // 右下角，留一点边距；sbv_anim 在 GML 里是垂直滚动条的出现动画宽度，
+  // 我们这边滚动条全屏时不画，所以直接用 rw - 16 再留 2px。
+  const xx = rw - 18, yy = rh - 18;
+  // 底板：对照 GML 里按主题取色的那段矩形
+  setColor(C.panel);
+  fillRect(xx, yy, 16, 16);
+  const hov = mouseRectangle(xx, yy, 16, 16) && !isDialogWindow(S.window);
+  if (hov) { G.cursor = 'pointer'; popupSet(xx, yy, 16, 16, '返回'); }
+  /* 图标：spr_layericons 第 8 帧（7 + fullscreen，fullscreen=1 → 8）。
+     非 Fluent 主题用单层实心图标，Fluent 用 _f 双层 —— 和 layerIcon 同一套规则。 */
+  if (S.theme !== 3) {
+    drawSprite('spr_layericons', 8, xx, yy, 1, 1, (S.theme === 2) ? '#ffffff' : '#000000', 0.7);
+  } else {
+    drawSprite('spr_layericons_f', 8 + (S.fdark ? 0 : 9), xx, yy, 1, 1, '#ffffff');
+    drawSprite('spr_layericons_f', 8 + 18, xx, yy, 1, 1,
+      hov ? T.accent[3] : T.accent[6 - 2 * (S.fdark ? 0 : 1)]);
+  }
+  if (hov && G.mbr[0]) {
+    S.fullscreen = 0;
+    setMsg('全屏模式 => 关闭');
+    // 退出全屏时顺手把抽屉也收起来，回到正常的竖屏布局
+    S.drawer = '';
+    UI.swallowPress = true;
+  }
+}
+
 /* ---------------------------------------------------------------- 竖屏抽屉
  *
  * 竖屏宽度不够并排放图层/钢琴，所以这两块改成「底部标签 + 浮层抽屉」：
@@ -1799,15 +1859,45 @@ function drawDrawerLayers(py, ph) {
       }
       S.changed = 1;
     });
+    /* 「选择本层所有方块」必须和桌面版 drawLayersPanel 完全一致 ——
+       既改 selected_layers 这个"哪些层被选中"的标记，也要真正把方块选进选区
+       （selectionAdd / selectionRemove）。之前抽屉版只 push/splice 了
+       selected_layers，选区本身没动，于是 S.selected 恒为 0：
+       用户看到的是「点了选择本层，但一个方块都没选中」，连带"全选层"也失效
+       （多选几层后依然 S.selected = 0，导出/删除等依赖选区的操作全是空操作）。 */
     iconBtn(2, 0, '选择本层所有方块', () => {
+      S.playing = 0;
       const k = S.selected_layers.indexOf(layer);
-      if (k > -1) S.selected_layers.splice(k, 1); else S.selected_layers.push(layer);
-      S.changed = 1;
+      if (k > -1) {
+        selectionRemove(0, layer, S.enda, layer, false, false);
+        S.selected_layers.splice(k, 1);
+      } else {
+        selectionAdd(0, layer, S.enda, layer, false, false);
+        S.selected_layers.push(layer);
+      }
     });
     iconBtn(3, 0, '新建层', () => { S.playing = 0; addLayer(layer, false); S.changed = 1; });
     iconBtn(4, 0, '删除层', () => { S.playing = 0; removeLayer(layer, false); S.changed = 1; });
-    iconBtn(5, 0, '上移本层', () => { if (layer > 0) { S.playing = 0; shiftLayers(layer, layer - 1, false); } });
-    iconBtn(6, 0, '下移本层', () => { if (layer < S.endb2 - 1) { S.playing = 0; shiftLayers(layer, layer + 1, false); } });
+    /* 图标按钮。注意「上移」和「下移」的可画性不能只靠 fn 内部判断：
+       iconBtn 会无条件把图标画出来，只在点击时执行 fn。
+       所以第 1 层原本也会画出一个"上移"箭头，点下去 fn 里 `if (layer > 0)`
+       直接跳过 —— 按钮看着在、实际是死的。
+       桌面版（drawLayersPanel）用 `if (layer > 0 && layerIcon(5, ...))` 把
+       图标本身的条件也带上了，两边必须一致。
+       同理最后一层不该有「下移」。 */
+    const canUp = layer > 0;
+    const canDown = layer < S.endb2 - 1;
+    if (canUp) {
+      iconBtn(5, 0, '上移本层', () => { S.playing = 0; shiftLayers(layer, layer - 1, false); });
+    } else {
+      // 没有上移图标时补一格空位，保证后面「下移」的横坐标与其它行对齐
+      bx += btnW;
+    }
+    if (canDown) {
+      iconBtn(6, 0, '下移本层', () => { S.playing = 0; shiftLayers(layer, layer + 1, false); });
+    } else {
+      bx += btnW;
+    }
   }
 
   G.mb = rawMb; G.mbp = rawMbp; G.mbr = rawMbr;
