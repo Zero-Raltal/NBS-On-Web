@@ -1622,7 +1622,14 @@ function openMidiInsMenu(c) {
     str += (c.ins === a ? iconPrefix(ICON.CHECK) : '') + INSTRUMENTS[a].name + '|';
   }
   S.midiMenuRow = c;
-  showMenu('midiimport_ins', G.mouse.x, G.mouse.y, str);
+  /* MIDI 导入窗口走 dialogFrame()，内部一切坐标都是【设计坐标】，
+     而 drawMenu 画在屏幕空间 —— 必须经 dlgToScreen() 换算。
+     注意 G.mouse 在 dialogFrame() 里已经被反向映射成设计坐标了
+     （见 dialogFrame 里 `G.mouse.x = (G.mouse.x - fit.tx) / fit.k`），
+     所以这里读到的是设计坐标，直接传给 showMenu 会让菜单偏到窗口左上角附近。
+     主题下拉框、schematic 导出窗口的两个下拉框之前都踩过同一个坑。 */
+  const sp = dlgToScreen(G.mouse.x, G.mouse.y);
+  showMenu('midiimport_ins', sp.x, sp.y, str);
 }
 /* 八度下拉（-3..+3） */
 function openMidiOctMenu(c) {
@@ -1631,20 +1638,23 @@ function openMidiOctMenu(c) {
     str += ((c.oct === v) ? iconPrefix(ICON.CHECK) : '') + (v > 0 ? '+' : '') + v + '|';
   }
   S.midiMenuRow = c;
-  showMenu('midiimport_octave', G.mouse.x, G.mouse.y, str);
+  const sp = dlgToScreen(G.mouse.x, G.mouse.y);   // 设计坐标 → 屏幕坐标
+  showMenu('midiimport_octave', sp.x, sp.y, str);
 }
 /* 打击乐音色/音高下拉 */
 function openMidiPercInsMenu(p) {
   let str = '无|';
   for (let a = 0; a < INSTRUMENTS.length; a++) str += (p.ins === a ? iconPrefix(ICON.CHECK) : '') + INSTRUMENTS[a].name + '|';
   S.midiPercRow = p;
-  showMenu('midiimport_percins', G.mouse.x, G.mouse.y, str);
+  const sp = dlgToScreen(G.mouse.x, G.mouse.y);
+  showMenu('midiimport_percins', sp.x, sp.y, str);
 }
 function openMidiPercPitchMenu(p) {
   let str = '';
   for (let k = 0; k < 88; k++) str += (p.key === k ? iconPrefix(ICON.CHECK) : '') + getKeyname(k, 1) + '|';
   S.midiPercRow = p;
-  showMenu('midiimport_percpitch', G.mouse.x, G.mouse.y, str);
+  const sp = dlgToScreen(G.mouse.x, G.mouse.y);
+  showMenu('midiimport_percpitch', sp.x, sp.y, str);
 }
 
 /* ---------------------------------------------------------------- 宏窗口 */

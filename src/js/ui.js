@@ -281,9 +281,22 @@ function drawCheckbox(x, y, state, label, locked) {
          非 Fluent 时前项乘 0、后项减 1 → 结果 -1，即「不着色，用位图原色」。 */
       if (state) drawSprite('spr_checkbox', 3 + group, x, y);
     }
-    /* 文字色：对照 draw_checkbox.gml:31-36 —— 默认 204,204,204，
-       theme 2 或 1 时改白字。 */
-    setColor((S.theme === 1 || S.theme === 2) ? '#ffffff' : '#cccccc');
+    /* 文字色：对照 draw_checkbox.gml。
+       注意 GML 的两个分支颜色来源【不同】：
+         · lock = 1（锁定）分支：draw_set_color(204,204,204)，theme 1/2 时改白字，
+           画完再 draw_theme_color() 恢复 —— 204,204,204 是【禁用态】的灰，只在这里用。
+         · 正常（未锁定）分支：画文字前【不设颜色】，用的是上一处
+           draw_theme_color() 留下的状态，即
+               theme == 2 || (fdark && theme == 3) → 白字，否则黑字。
+       之前把 204,204,204 当成了「非 Fluent 的通用文字色」写在分支外面，
+       于是经典主题(theme 0) 下所有可勾选项的文字都变成浅灰 #cccccc，
+       画在 #f0f0f0 的浅背景上几乎看不见 —— 看着就像"全都变成禁用的、
+       无法勾选"的样子。而 theme 1/2 因为改成了白色反倒是正常的。
+       现在严格分开：禁用态用 204,204,204（theme 1/2 白），
+       正常态用 draw_theme_color() 的规则。 */
+    setColor(locked
+      ? ((S.theme === 1 || S.theme === 2) ? '#ffffff' : make_color_rgb(204, 204, 204))
+      : ((S.theme === 2 || (S.theme === 3 && S.fdark)) ? '#ffffff' : '#000000'));
   } else {
     // Fluent 普通复选框，严格照 draw_checkbox.gml:142-182 的顺序：
     //   ① 填充：勾选 → accent[5 + 2*(m==1) + 3*(m==2)]
@@ -351,7 +364,13 @@ function drawRadiobox(x, y, state, label, locked) {
       // 选中标记：非 Fluent 时 alpha 算式结果为 -1，即用位图原色
       if (state) drawSprite('spr_radiobox', 3 + group, x, y);
     }
-    setColor((S.theme === 1 || S.theme === 2) ? '#ffffff' : '#cccccc');
+    /* 与 drawCheckbox 完全相同的问题（radiobox 的 GML 与 checkbox 共用同一套
+       禁用态/正常态配色规则）：204,204,204 只是【禁用态】颜色，
+       正常态必须走 draw_theme_color()。否则经典主题下单选按钮的文字
+       也是浅灰 #cccccc，在浅背景上看着像全部被禁用。 */
+    setColor(locked
+      ? ((S.theme === 1 || S.theme === 2) ? '#ffffff' : make_color_rgb(204, 204, 204))
+      : ((S.theme === 2 || (S.theme === 3 && S.fdark)) ? '#ffffff' : '#000000'));
   } else {
     setColor(C.controlBg);
     c.beginPath(); c.arc(x + 6, y + 6, 6, 0, Math.PI * 2); c.fill();

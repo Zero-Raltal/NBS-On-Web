@@ -1995,7 +1995,11 @@ function openSchInsBlockMenu(mx, my, insIndex) {
   const entries = schAllBlocks(false);
   const str = schBlockMenuString(entries, S.sch_exp_ins_block[insIndex], S.sch_exp_ins_data[insIndex]);
   UI.menu = null;
-  showMenu('schexport_insblock', mx, my, str);
+  /* 调用方传进来的是 dialogFrame() 内的【设计坐标】，而 drawMenu 画在屏幕空间，
+     必须换算（与原版 show_menu_ext 一致 —— 那个函数内部处理窗口坐标）。
+     漏了这一步，竖屏或窗口居中时下拉框会飞到窗口左上角附近。 */
+  const sp = dlgToScreen(mx, my);
+  showMenu('schexport_insblock', sp.x, sp.y, str);
   UI.menuTargetIns = insIndex;
   if (S.windowsound) playUISound('show');
 }
@@ -2009,7 +2013,8 @@ function openSchBlockMenu(mx, my, which) {
   const entries = schAllBlocks(which === 1);   // 电路不用玻璃/音符盒
   const str = schBlockMenuString(entries, curId, curDat);
   UI.menu = null;
-  showMenu('schexport_block', mx, my, str);
+  const sp = dlgToScreen(mx, my);   // 设计坐标 → 屏幕坐标（同 openSchInsBlockMenu）
+  showMenu('schexport_block', sp.x, sp.y, str);
   UI.menuTargetBlock = which;
   if (S.windowsound) playUISound('show');
 }
