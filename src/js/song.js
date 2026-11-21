@@ -17,6 +17,16 @@ const S = {
   /* fade：音符盒不透明（首选项「外观」页）。对照 control_create.gml:131 `fade = 0`。
      默认 0 = 按力度渐变；设 1 = 全部不透明。 */
   fade: 0,
+  /* show_welcome：启动时显示问候窗口。
+     对照 control_create.gml:586 `if (show_welcome) window = w_greeting`
+     以及 draw_window_preferences.gml:162 的「Show greeting window」开关。
+     【行为定案：首次显示一次，关掉后永不再自动弹】
+     它是一个全屏遮罩，会挡住后面的所有操作 —— 每帧弹、每次启动都弹是不可接受的。
+     所以：启动时若为 1 则打开；用户用「关闭」按钮 / Esc / 右上角关掉时，
+     drawGreeting 末尾会把 show_welcome 置 0 并落盘（saveSettings），
+     之后永不再自动出现，只有到「首选项 → 外观」手动勾回来才会再弹。
+     新用户因此能看到欢迎页和三个入口，老用户被打扰一次后就不再被打扰。 */
+  show_welcome: 1,
   show_soundcount: 0,
   hires: 1, clickinarea: 0, cursmarker: 0, timeline_pressa: -1,
   // MIDI 导入选项（对应 w_midi_* 系列变量）

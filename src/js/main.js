@@ -50,6 +50,10 @@ const SETTINGS_FIELDS = [
   // 声音
   'windowsound', 'mastervol', 'use_bpm', 'autosave', 'autosavemins',
   'show_oldwarning', 'channelstoggle', 'realvolume', 'realstereo',
+  /* show_welcome —— 启动时是否显示问候窗口。
+     对照 save_settings.gml / load_settings.gml 里 ini 的 "show_greeting"。
+     必须持久化：用户关掉它就是为了下次别再弹，记不住等于开关无效。 */
+  'show_welcome',
   // 播放 / 进度条
   'marker_follow', 'marker_pagebypage', 'marker_start', 'marker_end',
   'loop_session', 'loopmax',
@@ -231,6 +235,14 @@ async function boot() {
   if (wrapEl) wrapEl.classList.add('done');
   document.getElementById('loading').classList.add('hide');
 
+  /* 【启动时打开问候窗口】
+     对照 control_create.gml:586 `if (show_welcome) window = w_greeting`。
+     必须在所有资源加载完之后 —— 窗口里要画 spr_logo / spr_frame2 / spr_bigicons，
+     资源没就绪就打开会画成空白。
+     在此之前 W_GREETING 只有常量、没有绘制函数，drawWindows() 的 default 分支
+     又会把未知窗口 `S.window = 0` 清掉，所以它从来没出现过。 */
+  if (S.show_welcome) S.window = W_GREETING;
+
   // 首次交互后恢复音频上下文
   const resume = () => { resumeAudio(); window.removeEventListener('pointerdown', resume); };
   window.addEventListener('pointerdown', resume);
@@ -246,22 +258,31 @@ async function boot() {
     app.classList.remove('dragover');
     const f = e.dataTransfer.files && e.dataTransfer.files[0];
     if (!f) return;
-    const ext = (f.name.split('.').pop() || '').toLowerCase();
-    const ab = await f.arrayBuffer();
-    try {
-      if (ext === 'nbs') { loadNBSToEditor(ab, f.name); addToRecent(f.name, ab); }
-      else if (ext === 'mid' || ext === 'midi') importMidi(ab, f.name);
-      else if (ext === 'nbp') {
-        /* 拖拽打开：与菜单「导入片段」同一个函数，导入后立刻落地 */
-        const r = patternImportBytes(ab);
-        if (!r.ok) messageDialog(r.msg, '提示');
-        else setMsg('片段已导入并放置在 ' + (r.x + 1) + ' 列 / ' + (r.y + 1) + ' 层');
-      } else messageDialog('不支持的文件类型：.' + ext, '错误');
-    } catch (err) { messageDialog('打开失败：' + err.message, '错误'); }
+    await openFileObject(f);
   });
 
   startLoop(mainFrame);
   setTimeout(checkAutosaveRecovery, 600);
+}
+
+/* 打开一个 File 对象（浏览器 File / Blob）。
+   原来这段逻辑直接内联在 drop 事件里，问候窗口的「打开本地文件…」也要用，
+   所以抽出来共用 —— 两处行为必须完全一致，否则同一份文件
+   拖进来能开、从问候窗口选就打不开。 */
+async function openFileObject(f) {
+  if (!f) return;
+  const ext = (f.name.split('.').pop() || '').toLowerCase();
+  const ab = await f.arrayBuffer();
+  try {
+    if (ext === 'nbs') { loadNBSToEditor(ab, f.name); addToRecent(f.name, ab); }
+    else if (ext === 'mid' || ext === 'midi') importMidi(ab, f.name);
+    else if (ext === 'nbp') {
+      /* 与菜单「导入片段」同一个函数，导入后立刻落地 */
+      const r = patternImportBytes(ab);
+      if (!r.ok) messageDialog(r.msg, '提示');
+      else setMsg('片段已导入并放置在 ' + (r.x + 1) + ' 列 / ' + (r.y + 1) + ' 层');
+    } else messageDialog('不支持的文件类型：.' + ext, '错误');
+  } catch (err) { messageDialog('打开失败：' + err.message, '错误'); }
 }
 
 // 调试/自动化测试钩子（不影响正常使用）

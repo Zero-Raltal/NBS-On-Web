@@ -585,6 +585,11 @@ function drawWindows() {
     case W_PREFERENCES: drawPreferences(); break;
     case W_SAVEOPTIONS: drawSaveOptions(); break;
     case W_ABOUT: drawAbout(); break;
+    /* 【问候窗口必须显式注册】
+       之前 W_GREETING (=1) 只在 editor.js 里声明了常量，这里没有 case，
+       于是走了 default: `S.window = 0` —— 一旦把 window 设成 1 就被立刻清掉。
+       "设了马上被吞掉"看起来就跟"从来没实现"一模一样。 */
+    case W_GREETING: drawGreeting(); break;
     case W_MIDI: drawMidiImport(); break;
     case W_TREMOLO: drawTremoloDlg(); break;
     case W_STEREO: drawStereoDlg(); break;
@@ -1099,6 +1104,15 @@ function drawPreferencesBody() {
     if (drawCheckbox(ox + 40, oy + 152, !!S.blackout, '全黑模式', false, true)) S.blackout = S.blackout ? 0 : 1;
     if (drawCheckbox(ox + 40, oy + 174, !!S.windowsound, '界面音效', S.theme !== 3, true)) S.windowsound = S.windowsound ? 0 : 1;
     if (drawCheckbox(ox + 40, oy + 196, !!S.remove_effect, '显示删除效果', false)) S.remove_effect = S.remove_effect ? 0 : 1;
+    /* 「启动时显示问候窗口」
+       对照 draw_window_preferences.gml:162：
+         if (draw_checkbox(x1+40, y1+90+(theme=3)*22, show_welcome,
+                           "Show greeting window", "...", false, true)) show_welcome=!show_welcome
+       原版传了 is_switch = true（最后一个参数），所以这里是开关而不是复选框；
+       但那只在 Fluent 下生效，其余主题保持复选框 —— drawCheckbox 内部已有该判断。 */
+    if (drawCheckbox(ox + 40, oy + 218, !!S.show_welcome, '启动时显示问候窗口', false, true)) {
+      S.show_welcome = S.show_welcome ? 0 : 1;
+    }
 
     // 窗口
     drawAreaHeader(ox + 258, oy + 74, 220, 64, '窗口');
@@ -1285,11 +1299,163 @@ function drawSaveOptions() {
   okCancel(f, () => closeWindow());
 }
 
+/* ---------------------------------------------------------------- 问候窗口 */
+/* 对照 draw_window_greeting.gml 移植。
+   原版 700x430，左栏放 logo + 版本信息 + 社交链接，右栏放操作按钮。
+   这里必须实现 —— 之前 W_GREETING 只在 editor.js 里声明了常量，
+   没有任何绘制函数，而 drawWindows() 的 default 分支是
+   `S.window = 0`（未知窗口立即关闭），所以只要有人把 window 设成 1，
+   就会被静默吞掉：不是"没显示"，而是"设了马上被清成 0"。
+   这就是用户说的"问候窗口从来没显示过"的根因。 */
+function drawGreeting() {
+  const f = dialogFrame(700, 430);
+  const x1 = f.x1, y1 = f.y1, x2 = f.x2, y2 = f.y2;
+  drawWindow(x1, y1, x2, y2);
+
+  /* 左栏：logo + 文字（对照 gml:47-49
+     draw_sprite_ext(spr_logo, window_icon, x1 + 64, y1 + 50, 1, 1, 0, c_white, ...)）
+     spr_logo 原点是 (14,16)，drawSprite 内部自动扣掉，所以可以照抄 GML 坐标。
+     布局核对：左上角 = (x1+64-14, y1+50-16) = (x1+50, y1+34)，
+     占 165x165 → 到 y1+199；标题在 y1+213，正文 233/262/282/306 —— 不冲突。 */
+  drawSprite('spr_logo', 0, x1 + 64, y1 + 50);
+
+  // 标题（gml:50-51：font_info_med_bold + draw_text_center(x1+132, y1+213)）
+  // text() 第 4 参数是对齐方式，'center' 等价于 GML 的 draw_text_center
+  setFont(FONT.info_med_bold(20));
+  setColor(C.accent);
+  text(x1 + 132, y1 + 213, 'Note Block Studio', 'center');
+
+  // 版本行（gml:75-79）—— 网页版没有"发布日期"，改为版本号
+  setFont(FONT.mainbold(13));
+  setColor(C.text);
+  text(x1 + 132, y1 + 233, '网页重制版  Version 1.0', 'center');
+
+  // 简介（gml:87-88）
+  setFont(FONT.main());
+  setColor(C.textDim);
+  text(x1 + 132, y1 + 262, '一个开源的 Minecraft 音乐制作软件', 'center');
+
+  // 站点链接（gml:89-91：蓝色可点）
+  const siteY = y1 + 282;
+  setColor('#3e90ff');
+  const ghUrl = 'https://github.com/Zero-Raltal/NBS-On-Web';
+  const siteTxt = 'noteblock.studio';
+  const siteW = textWidth(siteTxt);
+  const siteX = x1 + 132 - siteW / 2;
+  text(siteX, siteY, siteTxt);
+  if (mouseRectangle(siteX, siteY, siteW, 14) && G.mbp[0]) {
+    G.clickConsumed = true;
+    window.open(ghUrl, '_blank');
+  }
+  setColor(C.text);
+
+  // 社交链接（gml:96-108）—— 网页版只保留仓库链接
+  setFont(FONT.small());
+  setColor('#3e90ff');
+  const ghY = y1 + 306;
+  const ghTxt = 'GitHub 仓库';
+  const ghW = textWidth(ghTxt);
+  text(x1 + 132 - ghW / 2, ghY, ghTxt);
+  if (mouseRectangle(x1 + 132 - ghW / 2, ghY, ghW, 14) && G.mbp[0]) {
+    G.clickConsumed = true;
+    window.open(ghUrl, '_blank');
+  }
+  setColor(C.text);
+
+  /* 竖分隔线（gml:110-116）：先亮线，再半透明主题色。
+     这条线把左栏（信息）和右栏（操作）分开。
+     窗口高 430，线从 y1+24 画到 y1+396 —— 上下各留一点边距。 */
+  setColor(S.fdark && S.theme === 3 ? '#000000' : '#FFFFFF');
+  line(x1 + 270, y1 + 24, x1 + 270, y1 + 396);
+  setAlpha(0.25);
+  setColor(C.accent);
+  line(x1 + 269, y1 + 24, x1 + 269, y1 + 396);
+  setAlpha(1);
+  setColor(C.text);
+
+  // 右栏标题（gml:117-118）
+  setColor(C.text);
+  text(x1 + 290, y1 + 20, '要做什么？');
+
+  /* 操作按钮（gml:120-...）。
+     原版有「新建歌曲 / 打开歌曲 / 最近歌曲 / Note Block World / 从 MIDI 生成」，
+     外加右下角的「播放器模式」。网页版没有 .nbs 文件系统与 Note Block World，
+     所以只保留三个真实可用的：新建、打开本地文件、从 MIDI 生成。
+     这是与 GML 的有意偏差，原因见上。 */
+  const bw = 224, bh = 32;
+  let by = y1 + 48;
+
+  const drawEntry = (label, iconFrame) => {
+    const over = mouseRectangle(x1 + 300, by, bw, bh);
+    const hov = over && (G.mb[0] || G.mbr[0]);
+    if (S.theme === 3) {
+      setColor(hov ? C.accentLight : C.controlBg);
+      roundRect(x1 + 300, by, x1 + 300 + bw, by + bh, 6, true);
+    } else {
+      drawSprite('spr_frame2', hov ? 2 : 0, x1 + 300, by);
+    }
+    if (iconFrame >= 0) drawSprite('spr_bigicons_f', iconFrame, x1 + 300 + (hov ? 1 : 0), by + (hov ? 1 : 0));
+    setColor(C.text);
+    setFont(FONT.main());
+    text(x1 + 300 + 48, by + 9 + (hov ? 1 : 0), label);
+    const clicked = over && G.mbr[0];
+    by += 44;
+    return clicked;
+  };
+
+  if (drawEntry('新建歌曲', 0)) {
+    G.clickConsumed = true;
+    dismissGreeting();
+    newSong();
+    return;
+  }
+  if (drawEntry('打开本地文件……', 1)) {
+    G.clickConsumed = true;
+    dismissGreeting();
+    /* 用现成的 pickFile（nbs.js:341），它已经处理了 input 的创建与清理。
+       接受 .nbs / .mid / .nbp —— 与拖拽打开支持的集合完全一致。 */
+    pickFile('.nbs,.mid,.midi,.nbp', (ab, name) => {
+      // pickFile 回调给的是 ArrayBuffer，这里包成 File 复用统一入口
+      openFileObject(new File([ab], name));
+    });
+    return;
+  }
+  if (drawEntry('从 MIDI 文件生成', 2)) {
+    G.clickConsumed = true;
+    dismissGreeting();
+    pickFile('.mid,.midi', (ab, name) => { importMidi(ab, name); });
+    return;
+  }
+
+  // 底部提示 + 关闭按钮
+  setFont(FONT.small());
+  setColor(C.textDim);
+  text(x1 + 300, y2 - 42, '关闭后不再自动显示，可在「首选项 → 外观」里重新开启。');
+  /* 关闭即"别再弹我"。这里是唯一的收尾点 ——
+     注意三个操作按钮（新建/打开/从MIDI）在各自分支里 return 前也走了这个函数，
+     见各自的 dismissGreeting() 调用，保证从哪个入口离开都会记下选择。 */
+  if (button2(x2 - 84, y2 - 34, 72, '关闭') || G.keysPressed['Escape']) dismissGreeting();
+}
+
+/* 关闭问候窗口，并记住"以后别再自动弹"。
+   单独抽成函数是因为有 4 个出口：关闭按钮、Esc、三个操作按钮。 */
+function dismissGreeting() {
+  S.show_welcome = 0;
+  if (typeof saveSettings === 'function') saveSettings();
+  closeWindow();
+}
+
 /* ---------------------------------------------------------------- 关于 */
 function drawAbout() {
   const f = dialogFrame(400, 360);
   drawWindow(f.x1, f.y1, f.x2, f.y2);
   drawWindowTitle(f.x1, f.y1, '关于');
+  /* logo（对照 draw_window_about.gml:12 的 draw_sprite_ext(spr_logo, 0, x1+80, y1+50, …)）
+     【但是不能照抄坐标】：原版 About 窗口是 580x410，logo 画在左上、
+     标题放在 y1+200（logo 正下方）；我们这个窗口是 400x360，文字从 y1+44 就开始，
+     直接照抄会让 165x165 的 logo 压住标题和正文。
+     所以这里把它缩小到 56x56 放在标题右边当装饰 —— 位置变了，用途一致。 */
+  drawSprite('spr_logo', 0, f.x1 + 360, f.y1 + 58, 0.34, 0.34);
   setFont(FONT.info_med_bold(20));
   setColor(C.accent);
   text(f.x1 + 20, f.y1 + 44, 'Note Block Studio');
