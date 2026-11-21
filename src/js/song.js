@@ -615,6 +615,31 @@ function shiftLayers(from, to, undo) {
     if (lockA0 === 2) S.solostr = S.solostr.split('|' + a + '|').join('|' + b + '|');
     else S.solostr = S.solostr.split('|' + b + '|').join('|' + a + '|');
   }
+  /* colfirst / collast 也必须跟着修正 —— 这是「点一下上移，音符消失」的真正原因。
+     它们描述「该列最上面 / 最下面一个有内容的层」，绘制音符的循环
+     （editor.js:1167）写的是：
+         if (layer < colfirst[col] || layer > collast[col]) continue;
+     交换 a、b 两层时边界值【确实会变】——这不是「占用集合不变」的纯置换：
+         · 该列只有 a 有内容 → 交换后变成只有 b 有内容，边界由 a 变成 b
+         · 该列只有 b 有内容 → 边界由 b 变成 a
+         · 两者都有 → 边界不变
+     之前这里完全没更新，于是把音符从层 a 上移到层 b 之后，collast 还停在 a，
+     绘制循环判定 b 越界、直接 continue —— 音符数据在网格里、就是不被画出来，
+     表现就是「点一下上移，音符消失了」。
+     而之后任何一次 recalcSong()（开头 colfirst.fill(-1) 再全表重扫）又会把边界
+     算对，音符重新出现 —— 这正是用户说的「再点一下上移，那个音符又回来了」。
+     不是第二次点产生了什么效果，是中间某次 recalcSong 顺手把边界修好了。
+     只重算真正受影响的列（内容落在 a 或 b 上的列）就够，不必整表重扫。 */
+  for (let x = 0; x < S.arraylength; x++) {
+    if (!gExists(x, a) && !gExists(x, b)) continue;
+    let nf = -1, nl = -1;
+    for (let y = 0; y < S.endb2; y++) {
+      if (!gExists(x, y)) continue;
+      if (nf < 0) nf = y;
+      nl = y;
+    }
+    colfirst[x] = nf; collast[x] = nl;
+  }
   /* endb 必须重算。它是「有内容的最下面一层」，渲染循环写的是
      `for (b = 0; b <= S.endb; b++)`，一旦内容被移到 endb 之外，
      音符数据还在、但根本不会被画出来 —— 这就是用户说的
