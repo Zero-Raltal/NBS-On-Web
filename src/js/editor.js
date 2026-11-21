@@ -246,7 +246,28 @@ function editorFrame(dt) {
   }
   drawEditor(dt);
   G.mb = rawMb; G.mbp = rawMbp; G.mbr = rawMbr; G.wheel = rawWheel;
+  /* 【菜单打开时，窗口控件不能消费这次输入】
+     用户反馈："点了下拉框的一个选项后，下拉框背后的东西也会被点到"。
+     根因就在这个顺序上：
+        · 上面把 G.mbr 恢复成【原始值】之后才调 drawWindows()；
+        · 菜单（下拉框的列表）是在 drawWindows() 之后由 drawMenu() 画的；
+        · 于是同一帧里，背后的窗口控件先用这次松开做了一次点击判定
+          （按下背后的按钮 / 又开了一个下拉框 / 选中了一行），
+          紧接着 drawMenu() 才用同一次松开关掉菜单并执行菜单项。
+     结果就是"一次点击，两处生效"。
+     GML 里没有这个问题：obj_menu 是一个独立常驻对象，菜单展开时
+     它的 Step 优先级高于窗口逻辑，会先消费掉这次输入。
+     这里用同样的办法：菜单打开期间，先把 G.mb/G.mbp/G.mbr 清零再画窗口，
+     画完再恢复给 drawMenu 用 —— 窗口看不到这次输入，菜单照常响应。 */
+  const menuOpen = !!UI.menu;
+  if (menuOpen) {
+    G.mb = [false, false, false]; G.mbp = [false, false, false];
+    G.mbr = [false, false, false]; G.wheel = 0;
+  }
   drawWindows();
+  if (menuOpen) {
+    G.mb = rawMb; G.mbp = rawMbp; G.mbr = rawMbr; G.wheel = rawWheel;
+  }
   /* 拖控件锁的兜底释放。
      注意时机：drawWindows() 里滑块/拖动条已经跑过一次 ——
      若左键仍按着，dragLock 是有效的，不能清；

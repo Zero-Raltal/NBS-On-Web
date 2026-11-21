@@ -346,6 +346,16 @@ function drawCheckbox(x, y, state, label, locked, isSwitch) {
       else if (S.fdark) setColor(gray(m === 0 ? 32 : m === 1 ? 42 : 48));
       else setColor(gray(m === 0 ? 243 : m === 1 ? 229 : 220));
       roundRect(x - 1, y - 1, x + 25, y + 12, 12, true);
+      /* 【未勾选时补一圈淡描边】
+         原版 Fluent 未勾选轨道是 243,243,243，而对话框底色也是 243 附近 ——
+         两者几乎同色，轨道在浅色主题下"看不见"，只剩一枚孤零零的滑块，
+         看起来像"这个开关没画出来"。实测截图就是这个效果。
+         这里只在【未勾选 + 浅色】时加一圈比轨道略深的边，
+         让胶囊轮廓可辨；勾选时轨道是强调色，本来就很清楚，不加。 */
+      if (!state && !S.fdark) {
+        setColor(gray(m === 0 ? 220 : m === 1 ? 210 : 200));
+        roundRect(x - 1, y - 1, x + 25, y + 12, 12, false);
+      }
       // 滑块（gml:132-140）：勾选在右端且深色 2105376(32)/浅色 15987699(243)
       setColor(S.fdark ? gray(state ? 32 : 243) : gray(state ? 243 : 32));
       if (state) roundRect(x + 15 - (m === 2 ? 1 : 0), y + 2, x + 22, y + 9, 3, true);
@@ -1231,12 +1241,28 @@ function drawMenu() {
        「选择左侧/右侧所有」用它做分界，而不是实时 S.selbx ——
        用户点菜单项时指针一定已经离开了原来那一格。 */
     const menuc = (M.menuc !== undefined) ? M.menuc : -1;
+    /* 【必须吞掉这一次松开，否则会穿透到菜单背后】
+       用户反馈："点了下拉框的一个选项后，下拉框背后的东西也会被点到"。
+       原因：这一路上层是「菜单浮层」，它靠 G.mbr[0]（本帧松开）触发；
+       而菜单背后的窗口控件（按钮 / 另一个下拉框 / 列表行）同样会读
+       G.mbr[0] 做点击判定。菜单是在 drawWindows() 之后才绘制的，
+       等它处理完这次松开、调用 closeMenu() 时，背后的控件【这一帧已经
+       先拿到过 G.mbr[0] 了】—— 于是同一次点击既选中了菜单项，
+       又按下了背后的控件。典型表现：点完下拉项，背后的按钮也响应了。
+       解法：菜单一旦消费掉这次松开，立刻置 UI.swallowPress，
+       让本帧之后以及下一帧的松开判定都不再生效（editorFrame 末尾会
+       在按键真正抬起后清除这个标记）。 */
+    UI.swallowPress = true;
     closeMenu();
     if (it && !it.inactive && it.sub === 0) {
       // 第 4 个参数是"本级菜单内的项序号"：音色子菜单用它定位乐器，
       // 不再靠中文标签文本反解名字（标签会带图标/快捷键前缀，容易解析错）。
       menuAction(name, it.label, it.n, it.spos, targetIdx, menuc);
     }
+  } else if (G.mbr[0] && openReady && noclick) {
+    /* 点在了分隔线 / 子菜单箭头上（noclick = 1）：这次松开也不该穿透，
+       菜单保持打开即可。 */
+    UI.swallowPress = true;
   }
   if (G.keysPressed['Escape']) closeMenu();
 }

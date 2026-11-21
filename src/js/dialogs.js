@@ -1016,16 +1016,16 @@ function drawPreferencesBody() {
   if (tab === 0) {
     // 启动
     drawAreaHeader(ox + 22, oy + 74, 243, 85, '启动');
-    if (drawCheckbox(ox + 40, oy + 90, !!S.show_oldwarning, '打开旧版格式时提示', false))
+    if (drawCheckbox(ox + 40, oy + 90, !!S.show_oldwarning, '打开旧版格式时提示', false, true))
       S.show_oldwarning = S.show_oldwarning ? 0 : 1;
-    if (drawCheckbox(ox + 40, oy + 112, !!S.windowsound, '界面音效', false))
+    if (drawCheckbox(ox + 40, oy + 112, !!S.windowsound, '界面音效', false, true))
       S.windowsound = S.windowsound ? 0 : 1;
     if (drawCheckbox(ox + 40, oy + 134, !!S.marker_follow, '播放时自动滚动', false))
       S.marker_follow = S.marker_follow ? 0 : 1;
 
     // 自动保存
     drawAreaHeader(ox + 278, oy + 74, 200, 85, '自动保存');
-    if (drawCheckbox(ox + 296, oy + 90, !!S.autosave, '启用自动保存', false))
+    if (drawCheckbox(ox + 296, oy + 90, !!S.autosave, '启用自动保存', false, true))
       S.autosave = S.autosave ? 0 : 1;
     setFont(FONT.small()); setColor(C.textDim);
     text(ox + 296, oy + 116, '间隔（分钟）');
@@ -1093,11 +1093,11 @@ function drawPreferencesBody() {
         showMenu('theme', sp.x, sp.y, s);
       }
     }
-    if (drawCheckbox(ox + 40, oy + 130, !!S.fdark, '暗色模式', S.theme !== 3)) {
+    if (drawCheckbox(ox + 40, oy + 130, !!S.fdark, '暗色模式', S.theme !== 3, true)) {
       S.fdark = S.fdark ? 0 : 1;
     }
-    if (drawCheckbox(ox + 40, oy + 152, !!S.blackout, '全黑模式', false)) S.blackout = S.blackout ? 0 : 1;
-    if (drawCheckbox(ox + 40, oy + 174, !!S.windowsound, '界面音效', S.theme !== 3)) S.windowsound = S.windowsound ? 0 : 1;
+    if (drawCheckbox(ox + 40, oy + 152, !!S.blackout, '全黑模式', false, true)) S.blackout = S.blackout ? 0 : 1;
+    if (drawCheckbox(ox + 40, oy + 174, !!S.windowsound, '界面音效', S.theme !== 3, true)) S.windowsound = S.windowsound ? 0 : 1;
     if (drawCheckbox(ox + 40, oy + 196, !!S.remove_effect, '显示删除效果', false)) S.remove_effect = S.remove_effect ? 0 : 1;
 
     // 窗口
@@ -1110,7 +1110,7 @@ function drawPreferencesBody() {
     if (button2(ox + 404, oy + 89, 64, '重置')) { S.window_scale = 1; layoutResize(); }
 
     // 分辨率 / 其它
-    if (drawCheckbox(ox + 276, oy + 116, !!S.hires, '为高分辨率优化')) S.hires = S.hires ? 0 : 1;
+    if (drawCheckbox(ox + 276, oy + 116, !!S.hires, '为高分辨率优化', false, true)) S.hires = S.hires ? 0 : 1;
     drawAreaHeader(ox + 22, oy + 239, 220, 65, '其它');
     if (drawCheckbox(ox + 40, oy + 259, !!S.show_soundcount, '状态栏显示发声数', false))
       S.show_soundcount = S.show_soundcount ? 0 : 1;
@@ -1135,7 +1135,7 @@ function drawPreferencesBody() {
 
     // 琴键
     drawAreaHeader(ox + 22, oy + 294, 456, 171, '琴键');
-    cb(310, 'show_piano', '显示琴键');
+    if (drawCheckbox(ox + 40, oy + 310, !!S.show_piano, '显示琴键', false, true)) S.show_piano = S.show_piano ? 0 : 1;
     setFont(FONT.small()); setColor(C.textDim);
     text(ox + 40, oy + 336, '琴键数量');
     setFont(FONT.main());
