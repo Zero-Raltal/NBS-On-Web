@@ -642,7 +642,8 @@ function scheduleAhead() {
     if (when > horizon) break;
 
     /* Tempo Changer 会改变播放速度，提前排期会让变速提前生效。
-       遇到这种列就不提前排了，留给即时触发处理（见 draw 里的分支）。 */
+       遇到这种列就不提前排了，留给即时触发处理（见下面的分支）。
+       【但"即时触发"必须真的存在，否则这一列永远不播、速度永远不变】 */
     let hasTempo = false;
     if (colamount[col] > 0) {
       for (let b = colfirst[col]; b <= collast[col]; b++) {
@@ -651,7 +652,39 @@ function scheduleAhead() {
         if (ins && ins.name === 'Tempo Changer') { hasTempo = true; break; }
       }
     }
-    if (hasTempo) break;
+    if (hasTempo) {
+      /* 【变速列怎么排期】
+         它不能像普通列那样"提前 0.25 秒带 audioWhen 排出去"，
+         因为 playColumnRange 会立刻改 S.tempo，而声音要到 when 才响 ——
+         变速会提前生效，整段时值都算错。
+         但也不能简单 break 掉不管：那样这一列永远不播、S.tempo 永远不变，
+         用户看到的"变速不生效"就是这么来的。
+         正确做法：
+           · 还没到点（when > now）→ break，S.sched_col 停在它身上，下一帧再看；
+           · 到点（when <= now）→ 当场播它（playColumnRange 里会把 S.tempo 改掉），
+             游标前进一格，然后【用新速度把锚点整体前移到"当前时刻"】。
+         【关于重锚】第一次我写成 setPlayAnchor(S.sched_col)，
+         但那样锚点位置 = col+1、锚点时间 = now，与实际时刻 (col + (now-when)*tempo)
+         不一致，下一帧算出 cur 偏小、判定游标落后，于是同一列被反复重排
+         （实测第 6 列被播了 49 次）。
+         正确做法是先按【旧速度】把位置外推到 now 得到精确的当前列位置，
+         再用【新速度】以那个位置为起点重锚。 */
+      if (when <= now + 0.02) {
+        /* 先把时间轴推进到此刻（此时 S.tempo 还是旧值，符合"到这一列之前按旧速度"） */
+        const posNow = S.play_anchor_pos + (now - S.play_anchor_time) * Math.max(0.25, S.play_anchor_tempo || tempo);
+        playColumnRange(col, col);          // ← 这一列会把 S.tempo 改成新值
+        S.sched_col = col + 1;
+        /* 用新速度、以"此刻所在的精确位置"为起点重锚。
+           posNow 可能略小于 col+1（还没完全走到下一列），这正是我们要的：
+           剩下的零头会在新速度下继续走完。 */
+        S.play_anchor_pos = Math.max(posNow, col);
+        S.play_anchor_time = now;
+        S.play_anchor_tempo = Math.max(0.25, S.tempo);
+        S.play_anchor_expected = S.play_anchor_pos;
+        continue;
+      }
+      break;
+    }
 
     playColumnRange(col, col, Math.max(when, now));
     S.sched_col = col + 1;
@@ -1104,8 +1137,13 @@ function handlePianoInput() {
 }
 
 /* ---------------------------------------------------------------- 绘制 */
-function drawEditor(dt) {
-  const c = G.ctx;
+/* Tempo Changer 方块的屏幕位置队列（对照 control_draw.gml:377 的
+   tempo_changer_display_queue）。
+   drawEditor() 里收集、drawTimeline() 里绘制，所以必须是模块级变量。
+   每次 drawEditor 开始时清空。 */
+const tempoQueue = [];
+
+function drawEditor(dt) {  const c = G.ctx;
   const rw = S.rw, rh = S.rh;
   const x1 = S.x1, y1 = S.y1, gx = S.gx, gy = S.gy;
   const totalcols = S.totalcols, totalrows = S.totalrows;
@@ -1190,6 +1228,11 @@ function drawEditor(dt) {
 
   // 音符
   const now = G.time;
+  /* Tempo Changer 方块的屏幕位置队列（对照 control_draw.gml:377 的
+     tempo_changer_display_queue）。在画方块时收集，画完网格再统一画 BPM 标签。
+     【必须是模块级变量，不能是局部 const】——
+     收集发生在 drawEditor()，绘制发生在 drawTimeline()，是两个函数。 */
+  tempoQueue.length = 0;
   for (let a = 0; a < totalcols; a++) {
     const col = sta + a;
     if (col > S.enda) break;
@@ -1224,6 +1267,22 @@ function drawEditor(dt) {
       let s = 0;
       if (S.playing === 0 && S.selected === 0) {
         if (S.selbx === col && S.selby === layer && !isDialogWindow(S.window) && !S.cursmarker) alpha += 0.5;
+      }
+      /* 【收集 Tempo Changer 方块的位置，供稍后画 BPM 标签】
+         对照 control_draw.gml:408：
+             if (instrument_list[...].name = "Tempo Changer")
+                 array_push(tempo_changer_display_queue,
+                     [x1 + 2 + 32*a - note_offset, y1 + 34 + 32*b,
+                      string(abs(song_pit[...]))])
+         也就是把屏幕坐标和 |pitch| 文本排队，等网格画完再统一画标签
+         （1171-1190 那段 for 循环从后往前画，并做"同列只画最上面一个"的去重）。 */
+      const _ins = INSTRUMENTS[gIns(col, layer)];
+      if (_ins && _ins.name === 'Tempo Changer') {
+        tempoQueue.push({
+          x: gx + 32 * a - noff,
+          y: gy + 32 * b,
+          text: String(Math.abs(gPit(col, layer))),
+        });
       }
       drawBlock(gx + 32 * a - noff, gy + 32 * b, gIns(col, layer), gKey(col, layer), gPan(col, layer), gVel(col, layer), gPit(col, layer), clamp(alpha, 0, 1.5), s);
     }
@@ -1567,6 +1626,48 @@ function drawTimeline() {
     const ex = gx + floor(ax / 32 + 0.5) * 32;
     drawSprite('spr_marker', 5 - flip, ex, y1 + 2, 1, lineH, 1, mkc);
     drawSprite('spr_marker', 4 - flip, ex, y1 + 2, 1, 1, mkc);
+    setAlpha(1);
+  }
+
+  /* 【BPM 标签：Tempo Changer 方块上方显示 "BPM = <值>"】
+     对照 control_draw.gml:1171-1190（在 marker 之前画，所以标签会被 marker 压住，
+     这正是原版的层次）。核心逻辑：
+       · 从队尾往前遍历（后画的在下面，所以倒序能保证同列"取最上面那个"）
+       · xx != last_tc_x 时把 last_tc_y 归零 —— 换了一列就允许重新显示
+       · 只有 yy > last_tc_y 才画 —— 同一列里只画最靠上的那个
+       · 用 spr_marker 的 0/1 帧当标记框，框内写 BPM 文本
+     spr_marker 帧约定：0/1 是这组标记框（theme 2 / blackout / fdark 时 +8）。 */
+  if (S.midiTempoChanger || tempoQueue.length) {
+    setFont(FONT.main());
+    const tcFrame = 8 * ((S.theme === 2 || S.blackout || (S.theme === 3 && S.fdark)) ? 1 : 0);
+    // 标签底色：对照 gml:1207-1210 的分主题取色
+    let tagBg = '#ffffff';
+    if (S.theme === 2) tagBg = '#363636';
+    else if (S.theme === 3) tagBg = '#fcfcfc';
+    if (S.theme === 3 && S.fdark) tagBg = '#2d2d2d';
+    let lastTcX = 0, lastTcY = 0;
+    for (let i = tempoQueue.length - 1; i >= 0; i--) {
+      const it = tempoQueue[i];
+      const xx = it.x, yy = it.y;
+      const label = 'BPM = ' + it.text;
+      if (xx !== lastTcX) lastTcY = 0;
+      if (yy > lastTcY) {
+        // 标记框（gml:1205-1206：spr_marker 第 0 帧和第 1 帧，第二帧下移 15）
+        drawSprite('spr_marker', tcFrame + 0, xx, y1 + 2);
+        drawSprite('spr_marker', tcFrame + 1, xx, y1 + 2 + 15);
+        const tw = textWidth(label);
+        // 底板 + 边框（gml:1211-1212 draw_rectangle / draw_area）
+        setColor(tagBg);
+        fillRect(xx + 10, y1 + 4, tw, 12);
+        setColor(C.areaBorder || C.controlBorder);
+        roundRect(xx + 9, y1 + 3, xx + 11 + tw, y1 + 17, 0, false);
+        // 文本（gml:1213-1214：draw_theme_color() 之后画，Fluent 时 y 少 1）
+        setColor(C.text);
+        text(xx + 10, y1 + 2 + (S.theme !== 3 ? 1 : 0), label);
+        lastTcY = yy;
+      }
+      lastTcX = xx;
+    }
     setAlpha(1);
   }
 

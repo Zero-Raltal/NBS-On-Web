@@ -251,17 +251,36 @@ function applyMidiImport() {
      precision=0 时直接放 BPM，precision=7 时乘 8 会超出 —— 这是原版的实现，
      我们照抄，不自行"修正"。 */
   if (tempoChanger) {
-    /* 原版用 `instrument_list[| first_custom_index]` —— 也就是「第一个自定义乐器」
-       当作变速标记的载体（这种方块在画面上是空白的）。
-       但 first_custom_index 的语义是 INSTRUMENTS.length（没有自定义乐器时等于
-       乐器总数），直接拿去索引会越界。
-       原版能这么用是因为它总是先保证存在一个占位乐器；我们不一定有。
-       所以：有自定义乐器就用它，没有就退回到第一个「用户乐器」，
-       再没有就用 0 —— 只要方块被放下、pitch 带着 BPM，功能就成立。 */
-    let customIns = S.first_custom_index;
+    /* 【必须真的创建一个名为 "Tempo Changer" 的自定义乐器】
+       对照 import_midi.gml:8：
+           if (w_midi_tempo_changer) ds_list_add(instrument_list, new_instrument("Tempo Changer", "", true))
+
+       这一步不是可选的：整套变速功能都靠【乐器名恰好等于 "Tempo Changer"】
+       来识别（toggle_playing.gml:48 播放时改速度、control_draw.gml:302
+       禁止调音高、control_draw.gml:408 画布上显示 BPM 标签）。
+       我原来只把方块放到 first_custom_index 上，但那个索引在
+       INSTRUMENTS 里可能根本不存在（= INSTRUMENTS.length），
+       或者指向一个普通的用户乐器 —— 于是播放时 `ins.name` 不是
+       "Tempo Changer"，速度永远不会变。这就是"导入了变速却没有变速"
+       在播放端残留的原因。
+
+       原版每次导入都会新加一个（重复导入会有多个同名乐器，这是原版行为）。
+       这里稍作收敛：已经存在同名乐器就复用，避免反复导入堆一堆。 */
+    let tcIns = INSTRUMENTS.findIndex(o => o && o.name === 'Tempo Changer');
+    if (tcIns < 0) {
+      if (typeof newInstrument === 'function') {
+        newInstrument('Tempo Changer', '', true, false);
+        tcIns = INSTRUMENTS.findIndex(o => o && o.name === 'Tempo Changer');
+      }
+    }
+    let customIns = tcIns;
     if (!(customIns >= 0 && customIns < INSTRUMENTS.length)) {
-      const userIns = INSTRUMENTS.findIndex(o => o && o.user);
-      customIns = userIns >= 0 ? userIns : 0;
+      /* 极端兜底：连创建都失败了，就退回旧逻辑，至少把方块放下。 */
+      customIns = S.first_custom_index;
+      if (!(customIns >= 0 && customIns < INSTRUMENTS.length)) {
+        const userIns = INSTRUMENTS.findIndex(o => o && o.user);
+        customIns = userIns >= 0 ? userIns : 0;
+      }
     }
     for (const te of (m.tempoEvents || [])) {
       let pos = floor((te.tick - base) / deltapertick);
