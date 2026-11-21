@@ -1575,26 +1575,47 @@ function drawHScrollbar() {
  *       xx = rw - sbv_anim;  yy = rh - 16
  *   并用 spr_layericons 的第 8 帧（返回箭头）。这里照搬。
  *
- *   er 为 true 时说明这帧已经画过了 —— 让调用方知道要不要跳过后续的
- *   状态栏绘制之类，避免按钮被盖住。 */
+ * 【尺寸为什么比原版大】
+ *   原版是 16×16（桌面上鼠标点，够用）。用户反馈："那个退出全屏的按钮太小了"。
+ *   竖屏是手指在点，16px 远低于可用的触控目标（一般建议 ≥ 40px）。
+ *   所以这里画成 48×48 的圆角按钮，图标按 3 倍缩放绘制并居中；
+ *   命中区再向外扩 4px 容差，实际有效触控区约 56×56。
+ *   位置相应往内收，保证在屏幕内且不压住右下角的音符。 */
+const FS_EXIT_SIZE = 48;      // 按钮视觉尺寸
+const FS_EXIT_MARGIN = 10;    // 距屏幕右下角的边距
+const FS_EXIT_PAD = 4;        // 命中区在视觉尺寸外再扩的容差
+
 function drawFullscreenExit() {
   if (!S.fullscreen) return;
   const rw = S.rw, rh = S.rh;
-  // 右下角，留一点边距；sbv_anim 在 GML 里是垂直滚动条的出现动画宽度，
-  // 我们这边滚动条全屏时不画，所以直接用 rw - 16 再留 2px。
-  const xx = rw - 18, yy = rh - 18;
-  // 底板：对照 GML 里按主题取色的那段矩形
-  setColor(C.panel);
-  fillRect(xx, yy, 16, 16);
-  const hov = mouseRectangle(xx, yy, 16, 16) && !isDialogWindow(S.window);
-  if (hov) { G.cursor = 'pointer'; popupSet(xx, yy, 16, 16, '返回'); }
+  const sz = FS_EXIT_SIZE;
+  const xx = rw - sz - FS_EXIT_MARGIN;
+  const yy = rh - sz - FS_EXIT_MARGIN;
+
+  // 命中的矩形比按钮本身大一圈，手指按偏一点也能中
+  const hov = mouseRectangle(xx - FS_EXIT_PAD, yy - FS_EXIT_PAD, sz + FS_EXIT_PAD * 2, sz + FS_EXIT_PAD * 2)
+    && !isDialogWindow(S.window);
+  if (hov) { G.cursor = 'pointer'; popupSet(xx, yy, sz, sz, '返回（退出全屏）'); }
+
+  /* 底板：做成明显的按钮而不是裸图标 ——
+     全屏时背景是亮色网格，只有底板才能在网格上也一眼看见。
+     用主题色 + 描边，和各种对话框按钮保持同一套视觉。 */
+  setColor(hov ? (C.dark ? '#4a4a4a' : '#e0e0e0') : (C.dark ? '#333333' : '#ededed'));
+  roundRect(xx, yy, xx + sz, yy + sz, 8, true);
+  setColor(hov ? C.accent : C.controlBorder);
+  roundRect(xx + 0.5, yy + 0.5, xx + sz - 0.5, yy + sz - 0.5, 8, false);
+
   /* 图标：spr_layericons 第 8 帧（7 + fullscreen，fullscreen=1 → 8）。
+     原生 16×16，按 sz/16 的倍数放大到按钮内部，留 8px 内边距。
      非 Fluent 主题用单层实心图标，Fluent 用 _f 双层 —— 和 layerIcon 同一套规则。 */
+  const iconSz = sz - 16;
+  const k = iconSz / 16;
+  const ix = xx + 8, iy = yy + 8;
   if (S.theme !== 3) {
-    drawSprite('spr_layericons', 8, xx, yy, 1, 1, (S.theme === 2) ? '#ffffff' : '#000000', 0.7);
+    drawSprite('spr_layericons', 8, ix, iy, k, k, (S.theme === 2) ? '#ffffff' : '#000000', 0.85);
   } else {
-    drawSprite('spr_layericons_f', 8 + (S.fdark ? 0 : 9), xx, yy, 1, 1, '#ffffff');
-    drawSprite('spr_layericons_f', 8 + 18, xx, yy, 1, 1,
+    drawSprite('spr_layericons_f', 8 + (S.fdark ? 0 : 9), ix, iy, k, k, '#ffffff');
+    drawSprite('spr_layericons_f', 8 + 18, ix, iy, k, k,
       hov ? T.accent[3] : T.accent[6 - 2 * (S.fdark ? 0 : 1)]);
   }
   if (hov && G.mbr[0]) {
@@ -1622,6 +1643,10 @@ function drawFullscreenExit() {
  */
 const DRAWER_H = 30;          // 底部标签条高度
 const DRAWER_PANEL_H = 190;   // 抽出的面板高度
+/* 抽屉顶部「抓手条」的高度，同时也是【点这里收起抽屉】的命中高度。
+   做成 28 是因为手指目标不该小于 ~24px；视觉上仍然只画那条 4px 的小横条，
+   但热区是整条全宽。 */
+const DRAWER_GRAB_H = 28;
 /* 八度平移的步长（半音）。12 太大（竖屏只显示 6~12 个键，
    按一下整个音域就换掉了，找不着原来的音）；6 个半音刚好跨过黑键区。 */
 const OCT_STEP = 6;
@@ -1715,13 +1740,35 @@ function drawDrawer() {
   fillRect(0, py, rw, ph);
   setColor(C.separator);
   line(0, py, rw, py);
-  // 顶部把手，暗示"这是可收起的抽屉"
-  setColor(C.textDim);
+  /* 顶部把手：既是视觉提示，也是【关闭热区】。
+     原来是纯装饰（只画一条 6px 的小横条），用户很自然地去点它、
+     或者点抽屉顶上那一片空白想收起，结果毫无反应 ——
+     只能去点底部标签栏，或者点抽屉外面的遮罩，两条路都不直观。
+     现在把「抽屉顶部这一条」整条做成关闭热区：
+     高度 DRAWER_GRAB_H（比那条视觉小横条高得多，手指好点），
+     覆盖全宽，点了就收起。 */
+  const grabHit = DRAWER_GRAB_H;
+  const inGrab = mouseRectangle(0, py, rw, grabHit) && !isDialogWindow(S.window);
+  if (inGrab) G.cursor = 'pointer';
+  setColor(inGrab ? C.text : C.textDim);
   roundRect(rw / 2 - 18, py + 3, rw / 2 + 18, py + 6, 2, true);
+  {
+    const mbrTap2 = (UI.rawMbr || G.mbr);
+    if (inGrab && mbrTap2[0]) {
+      S.drawer = '';
+      UI.swallowPress = true;
+      return;
+    }
+  }
 
-  if (S.drawer === 'layers') drawDrawerLayers(py, ph);
-  else if (S.drawer === 'piano') drawDrawerPiano(py, ph);
-  else drawDrawerProps(py, ph);
+  /* 子面板从抓手条下方开始画，避免和「点这里收起」的热区抢同一片区域 ——
+     否则在图层列表第一行点一下，会被抓手判定截走，变成"想点按钮却关了抽屉"。
+     cy 就是内容区的起点与高度。 */
+  const cy = py + DRAWER_GRAB_H;
+  const ch = ph - DRAWER_GRAB_H;
+  if (S.drawer === 'layers') drawDrawerLayers(cy, ch);
+  else if (S.drawer === 'piano') drawDrawerPiano(cy, ch);
+  else drawDrawerProps(cy, ch);
 }
 
 /* 色度键号 ↔ 白键索引 的双向换算。
@@ -2486,13 +2533,37 @@ function drawTopBar() {
   // 音色盒
   const insCount = INSTRUMENTS.length;
   /* 竖屏下不能按「剩余宽度」算图标数（会算出 5 个下限，仍然溢出）。
-     直接按一行能放几个算，让音色盒也参与折行。 */
-  const insAvail = wrapMode ? Math.max(3, floor((rw - 12) / 25)) : Math.max(5, Math.ceil((rw - 920) / 25));
+     直接按一行能放几个算，让音色盒也参与折行。
+
+     【必须预留末尾那个按钮的宽度】
+     每行末尾还有一个按钮：收起时装的是「展开」箭头（INSBOX_EXPAND），
+     展开时装的是「折叠」箭头（INSBOX_COLLAPSE）。它和音色图标一样宽（25）。
+     原来 insAvail 只减掉了左右各 6 的边距，没给按钮留位置：
+     rw=390 时算出 floor((390-12)/25) = 15 个图标，
+     盒子宽 15*25+4 = 379 正好把屏幕占满，按钮被挤到 x=381~406 —— 屏幕之外，
+     表现为「盒子右下角只剩一小块，点不到折叠」。
+     所以这里多减一个 25，保证「N 个图标 + 1 个按钮」整行放得下。 */
+  const insAvail = wrapMode
+    ? Math.max(3, floor((rw - 12 - 25) / 25))
+    : Math.max(5, Math.ceil((rw - 920 - 25) / 25));
   const insIcons = median(5, Math.min(insAvail, insCount), insCount);
   if (S.showinsbox) {
-    if (wrapMode && rowX + insIcons * 25 + 25 > rw - marginR) { rowX = 6; rowY += 25; rowMaxY = Math.max(rowMaxY, rowY); }
-    xx = rowX;
+    /* 【展开的音色盒要按它自己的【全部行数】让位，而不是只让一行】
+       盒子里有 insCount 个音色、每行 insIcons 个，所以占 rows = ceil(insCount/insIcons)
+       行。原写法只在放不下时 `rowY += 25`（让一行），然后 step(insIcons*25) 右移 ——
+       竖屏 rw=390 时 insIcons 只有 13，16 个音色排成 2 行，
+       盒子边框实际是 y 71→125（54px 高），可后续工具图标仍然画在 y=98，
+       整整 10 个图标压在音色按钮上面，点哪个都先命中音色。
+       正确做法：把游标整体挪到盒子【下方】——
+       ① 若盒子能整块放进当前行剩余宽度，就留在本行，行高按 rows 撑开；
+       ② 放不下就换行，从左边起。
+       两种情况都要让 rowMaxY 覆盖盒子的底部，后续控件才会排到盒子下面。 */
     const rows = Math.ceil(insCount / insIcons);
+    const boxW = insIcons * 25 + 25;      // 盒子 + 折叠按钮
+    if (wrapMode && rowX + boxW > rw - marginR) {
+      rowX = 6; rowY += 25;
+    }
+    xx = rowX;
     drawWindow(xx - 2, rowY - 2, xx + insIcons * 25 + 2, rowY + rows * 25 + 2);
     for (let a = 0; a < rows; a++) {
       for (let b = 0; b < insIcons; b++) {
@@ -2504,10 +2575,13 @@ function drawTopBar() {
       }
     }
     if (G.mbr[0] && !mouseRectangle(xx, rowY, insIcons * 25, rows * 25)) { S.showinsbox = 0; }
-    step(insIcons * 25); xx = atIcon();
-    insIcon(ICON.INSBOX_COLLAPSE, xx, rowY, false, true);
-    step(IW); xx = atIcon();
-    rowMaxY = Math.max(rowMaxY, rowY + rows * 25 - 25);
+    // 折叠按钮放在盒子最后一行的右端，跟着盒子走
+    insIcon(ICON.INSBOX_COLLAPSE, xx + insIcons * 25, rowY + (rows - 1) * 25, false, true);
+    /* 关键：把游标移到盒子【正下方】。盒子高度是 rows*25，
+       所以下一行起点 = rowY + rows*25；行高也要按盒子底部撑开。 */
+    rowY += rows * 25;
+    rowX = 6;
+    rowMaxY = Math.max(rowMaxY, rowY);
   } else {
     if (S.instrument < S.insbox_start) S.insbox_start = floor(Math.max(0, S.insbox_start - insIcons) / insIcons) * insIcons;
     else if (S.instrument > S.insbox_start + insIcons - 1) S.insbox_start = floor((S.insbox_start + insIcons) / insIcons) * insIcons;
