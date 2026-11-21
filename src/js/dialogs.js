@@ -1748,31 +1748,124 @@ function drawSetPitchDlg() {
   S.setpit = clamp(Math.round(drawDragValue(46, f.x1 + 170, f.y1 + 62, S.setpit, 1)), -1200, 1200);
   okCancel(f, () => { closeWindow(); macroSetPitch(S.setpit); });
 }
+/* 速度测量器 —— 完整移植 draw_window_tempo_tapper.gml。
+ *
+ * 【和之前那版完全是两套东西】
+ *   旧实现是我自己想的：点一下按钮把时间戳塞进 S.tapTimes 数组，
+ *   算相邻间隔的平均值，然后【直接改 S.tempo】并立刻生效。
+ *   原版不是这样，它有六个状态量参与（control_create.gml:400-404）：
+ *       taptempo  正在测量的速度
+ *       tapping   是否正在打点
+ *       taps      已打点次数
+ *       tapdouble 应用时是否把速度翻倍 ← 用户要求补的那个选项
+ *       ltime     上一次打点的时间
+ *   而且原版【不立刻应用】，只在按「确认」时才算：
+ *       tempo = (ctempo * (1 + tapdouble)) / 15
+ *   也就是 t/s 与双倍在确认那一刻才合并，中途改选项不会污染已有测量。
+ *
+ * 【打点公式为什么长那样】
+ *   gml:33   taptempo = ((60 / dt) + ltempo * taps) / ((taps + 1) * (ltempo != 0) + (!ltempo))
+ *   这是【增量平均】：把新的一次间隔换算成 BPM，和"前 taps 次的累计值"求平均。
+ *   分母那个 ((taps+1)*(ltempo!=0) + (!ltempo)) 看着怪，其实是在处理第一次打点：
+ *   ltempo == 0 时它等于 1，避免除以 0 并把首拍直接作为结果。
+ *
+ * 【重置条件】
+ *   gml:34   如果这次间隔换算出来的 BPM <= ltempo/2（打得慢了一倍以上），
+ *   认为用户是"重新开始打"，把 taptempo 和 taps 清零。
+ *   没有这个，中途停下再打会把两种节奏混在一起平均。
+ *
+ * 【键位】原版是 T 键（gml:32 keyboard_check_pressed(ord("T"))），
+ *   窗口标题里也写着「(按 T 打速度)」。不是空格。
+ *   打点时如果装了节拍器音色会响一声（gml:41）。
+ */
 function drawTempoTapper() {
-  const f = macroDialogBase(320, 220, '速度测量器');
-  setFont(FONT.small()); setColor(C.textDim);
-  text(f.x1 + 16, f.y1 + 44, '跟着节拍点击按钮，程序会估算速度。');
-  setFont(FONT.main());
-  S.tapTimes = S.tapTimes || [];
-  if (button2(f.x1 + 16, f.y1 + 70, 140, '点击 / 空格')) {
-    const now = performance.now();
-    S.tapTimes.push(now);
-    if (S.tapTimes.length > 9) S.tapTimes.shift();
-    if (S.tapTimes.length > 1) {
-      let sum = 0;
-      for (let i = 1; i < S.tapTimes.length; i++) sum += S.tapTimes[i] - S.tapTimes[i - 1];
-      const avg = sum / (S.tapTimes.length - 1);
-      const bpm = 60000 / avg;
-      S.tempo = Math.round((bpm / 15) * 100) / 100;
-      S.use_bpm = 1;
-      setMsg('测得 BPM ≈ ' + bpm.toFixed(1));
-    }
+  /* 原版窗口只有 140x130（gml:8-10 的 x1 = rw/2-80, y1 = rh/2-80+offset，
+     draw_window(x1, y1, x1+140, y1+130)）。比我们之前的 320x220 紧凑得多。
+     这里保留 dialogFrame 的自适应缩放，只把设计尺寸改成原版的 150x140
+     （+10 是给标题栏留的高度，原版 draw_window 的标题画在框内）。
+     —— 太小的窗口在竖屏上会被放大镜式地拉得很大，所以给一个下限 190x170。 */
+  const f = dialogFrame(190, 170);
+  drawWindow(f.x1, f.y1, f.x2, f.y2);
+  drawWindowTitle(f.x1, f.y1, '速度测量器');
+
+  // 状态量（对照 control_create.gml:400-404）
+  if (S.taptempo === undefined) S.taptempo = 0;
+  if (S.tapping === undefined) S.tapping = 0;
+  if (S.taps === undefined) S.taps = 0;
+  if (S.tapdouble === undefined) S.tapdouble = 0;
+  if (S.tap_ltime === undefined) S.tap_ltime = 0;
+
+  // 原版 gml:17-22：经典主题给测量区铺一块白底 + 灰框
+  if (S.theme === 0) {
+    setColor('#ffffff');
+    fillRect(f.x1 + 6, f.y1 + 26, 134 - 6, 92 - 26);
+    setColor(make_color_rgb(137, 140, 149));
+    roundRect(f.x1 + 6, f.y1 + 26, f.x1 + 134, f.y1 + 92, 0, false);
   }
-  setFont(FONT.info_med_bold());
-  setColor(C.accent);
-  text(f.x1 + 180, f.y1 + 76, (S.tempo * 15).toFixed(1) + ' BPM');
-  setFont(FONT.main());
-  okCancel(f, () => closeWindow(), '确定');
+  // gml:24-29 区域标题，单位跟着 use_bpm 变
+  drawAreaHeader(f.x1 + 10, f.y1 + 43, 120, 35,
+    (S.use_bpm ? 'BPM' : 't/s') + ' (按 T 打速度)');
+
+  /* 打点（gml:32-42）。current_time 在 GML 里是毫秒，这里用 performance.now()。 */
+  if (G.keysPressed['t'] || G.keysPressed['T']) {
+    const now = performance.now();
+    const ltempo = S.taptempo;
+    if (S.tapping) {
+      const dtSec = (now - S.tap_ltime) / 1000;
+      if (dtSec > 0) {
+        const inst = 60 / dtSec;
+        // gml:33 的增量平均。分母那个三元式照抄：ltempo==0 时取 1。
+        const denom = (S.taps + 1) * (ltempo !== 0 ? 1 : 0) + (ltempo === 0 ? 1 : 0);
+        S.taptempo = (inst + ltempo * S.taps) / denom;
+      }
+      // gml:34-37：慢了一倍以上 → 认为重新开始
+      if (Math.floor(60 / Math.max(dtSec, 0.001) + 0.5) <= ltempo / 2 && ltempo !== 0) {
+        S.taptempo = 0;
+        S.taps = 0;
+      }
+    }
+    S.tapping = 1;
+    S.tap_ltime = now;
+    S.taps += 1;
+    if (S.windowsound) playUISound('invoke');
+  }
+
+  // gml:43-47 显示当前测得的速度
+  const ctempo = Math.floor(S.taptempo + 0.5);
+  if (S.tapping && S.taptempo !== 0) {
+    setFont(FONT.info_med_bold());
+    setColor(C.accent);
+    const shown = S.use_bpm ? String(ctempo) : (ctempo / 15).toFixed(2);
+    text(f.x1 + 60, f.y1 + 55, shown, 'center');
+    setFont(FONT.main());
+  }
+
+  /* 双倍速度（gml:48-49）—— 用户要求补的就是这一条。
+     第 6 个参数传 1（is_switch），所以 Fluent 主题下它是开关，
+     其它主题仍是复选框，和原版一致。 */
+  if (drawCheckbox(f.x1 + 15, f.y1 + 80, !!S.tapdouble, '双倍速度', false, true)) {
+    S.tapdouble = S.tapdouble ? 0 : 1;
+  }
+
+  // gml:52-65 确认：这时才把测量值（含双倍）写进 tempo
+  const ok = button2(f.x1 + 10, f.y1 + 132, 60, '确认');
+  const no = button2(f.x1 + 70, f.y1 + 132, 60, '取消');
+  if (ok) {
+    /* gml:54   tempo = (ctempo * (1 + tapdouble)) / 15
+       注意 tapdouble 是 0/1，所以 (1 + tapdouble) 就是 ×1 或 ×2。
+       直接赋给 S.tempo，与其它地方一致（NBS 内部 tempo 单位是 t/s，
+       BPM = tempo * 15）。 */
+    S.tempo = (ctempo * (1 + S.tapdouble)) / 15;
+    S.changed = 1;
+    S.taptempo = 0; S.tapping = 0; S.tap_ltime = 0; S.taps = 0;
+    setMsg('速度已设为 ' + (S.tempo * 15).toFixed(2) + ' BPM');
+    closeWindow();
+  }
+  if (no || G.keysPressed['Escape']) {
+    // gml:67-69 取消也要把这些清掉
+    S.taptempo = 0; S.tapping = 0; S.tap_ltime = 0; S.taps = 0;
+    closeWindow();
+  }
 }
 /* MIDI 设备管理器。实现在 js/mididevice.js（Web MIDI API）。
    打开时尝试获取权限；不支持或拒绝授权时显示具体原因，
