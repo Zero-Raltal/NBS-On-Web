@@ -97,6 +97,9 @@ const SETTINGS_FIELDS = [
   // MIDI 导入选项
   'midiRemember', 'midiRemoveSilent', 'midiNameLayers', 'midiNamePatch',
   'midiTempo', 'midiVel', 'midiOctave',
+  /* midiTempoChanger：「速度变化」（原版 w_midi_tempo_changer）。
+     导入带变速的 MIDI 时是否把变速事件写进第 0 层。 */
+  'midiTempoChanger',
   // MIDI 输入设备（实时录入）与音频渲染导出
   'midiRecord', 'midiRecordAdvance', 'render_samplerate',
   // 「只提示一次」类警告的已确认标记。

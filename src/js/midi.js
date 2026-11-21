@@ -30,6 +30,25 @@ function parseMidi(buf) {
   const tracks = [];
   let tempo = 500000;
   let timesig = [4, 4];
+  /* 【记录全部 tempo 事件，而不只是最后一个】
+     用户报："导入了带变速的 MIDI，结果放得飞快，并且没有变速"。
+     根因就在这里：原来只有一个 tempo 变量，每遇到 0x51 就覆盖，
+     循环结束时留下的是【最后一个】tempo，前面的变速全丢。
+     更糟的是"放得飞快"——因为时间长度用最后一个（往往最快的）tempo
+     去换算整首歌，于是算出来的 tempo 远高于实际。
+
+     对照 open_midi.gml:101-112，原版是两个东西分开记：
+         midi_micsecqn                  ← 只有【第一个】tempo（用来算 songlength）
+         midi_tempo_changer_x[]         ← 每个变速事件的 tick 位置
+         midi_tempo_changer_tempo[]     ← 每个变速事件的 BPM
+     这里照抄：tempoEvents 记全部，tempo 仍然保留"第一个"的语义
+     （原来是最后一个，这也是个 bug —— 见下面 tempo 的赋值）。 */
+  const tempoEvents = [];
+  /* 标志位：「是否已经取到过第一个 tempo」。
+     不能写成 `if (tempo === 500000) tempo = us` —— 500000 既是初值、
+     又恰好是 120BPM 的常见取值，于是第一个事件赋完值后条件依然成立，
+     第二个事件照样会覆盖。必须用独立布尔量。 */
+  let tempoSeen = false;
 
   for (let t = 0; t < ntracks; t++) {
     if (p + 8 > buf.byteLength) break;
@@ -49,7 +68,26 @@ function parseMidi(buf) {
         const meta = u8();
         const l = varlen();
         if (meta === 0x03) { let s = ''; for (let i = 0; i < l; i++) s += String.fromCharCode(u8()); name = s; }
-        else if (meta === 0x51) { const a = u8(), b = u8(), c = u8(); tempo = a * 65536 + b * 256 + c; p += Math.max(0, l - 3); }
+        else if (meta === 0x51) {
+          const a = u8(), b = u8(), c = u8();
+          const us = a * 65536 + b * 256 + c;
+          /* 对照 open_midi.gml:107-109：
+               midi_tempo_changer_x[]     = p        （该事件在轨道内的 tick）
+               midi_tempo_changer_tempo[] = 60000000 / us
+               也就是 BPM = 60,000,000 / 每四分音符微秒数
+             这里同时记 tick，后面按 deltapertick 换算成列号。 */
+          if (us > 0) tempoEvents.push({ tick, us, bpm: 60000000 / us });
+          /* 【第一个才是 midi_micsecqn】
+             open_midi.gml:110 `if (midi_micsecqn = 0) midi_micsecqn = ...`
+             —— 只在还没赋值时才写，也就是永远保留第一个。
+             原来我们每遇到一个就覆盖，留下最后一个，这是"放得飞快"的直接原因。
+             注意必须用 tempoSeen 标志位判断，不能写 `if (tempo === 500000)`：
+             500000 既是初值又是 120BPM 的常见取值，第一个事件赋完之后
+             条件仍然成立，第二个事件照样会覆盖 —— 这个坑我实际踩过，
+             表现就是 120→240 的文件算出来是 32（=240BPM）而不是 16。 */
+          if (!tempoSeen) { tempo = us; tempoSeen = true; }
+          p += Math.max(0, l - 3);
+        }
         else if (meta === 0x58) { timesig = [u8(), u8()]; p += Math.max(0, l - 2); }
         else p += l;
         continue;
@@ -73,7 +111,7 @@ function parseMidi(buf) {
     for (const x of patches) chPatch[x.ch] = x.program;
     tracks.push({ name: name || ('Track ' + (t + 1)), notes, program, amount, chPatch });
   }
-  return { ppq, tempo, timesig, tracks, format, smpte };
+  return { ppq, tempo, timesig, tracks, format, smpte, tempoEvents };
 }
 
 /* 每个通道的默认 SETTINGS（对照 draw_window_midi_import 的「使用默认值」） */
@@ -184,13 +222,59 @@ function applyMidiImport() {
   S.timesignature = clamp(m.timesig[0] || 4, 2, 8);
 
   // 每个通道的层带起点 = 前面所有通道高度之和
+  /* 【速度变化层要独占第 0 层，所有通道整体下移一层】
+     对照 import_midi.gml:134 `if (w_midi_tempo_changer) yy += 1`
+     以及 import_midi.gml:170-173（命名时 `yy += 1; layername[0] = "TempoChgr"`）。
+     原版的第 0 层专门用来放变速事件，通道从第 1 层开始。 */
+  const tempoChanger = !!S.midiTempoChanger && (m.tempoEvents || []).length > 0;
   const layerBase = {};
-  let yy = 0;
+  let yy = tempoChanger ? 1 : 0;
   for (let ch = 0; ch <= 15; ch++) {
     layerBase[ch] = yy;
     if (channelheight[ch]) yy += channelheight[ch];
   }
   S.endb2 = Math.max(1, yy);
+
+  /* 【写入变速事件】
+     对照 import_midi.gml:147-155：
+         pos = floor((midi_tempo_changer_x[t] - midi_minpos * removesilent) / deltapertick)
+         if (!song_exists[pos, 0]) add_block(pos, 0, first_custom_index, 39, 100, 100, tempo * (precision + 1))
+         else                     change_block(pos, 0, ..., 同上)
+     也就是：
+       · 放在第 0 层
+       · 用「自定义乐器」第一个（custom instrument #0）—— 这是 NBS 约定的变速标记
+       · 音高固定 39
+       · 力度/声像 100
+       · **pitch（音高偏离值）承载 BPM**，并且乘 (precision+1)
+     注意 pitch 是 -100~100 的"半音偏离"字段，原版拿它当数值容器用，
+     所以能放下的 BPM 上限是 100/(precision+1)… 实际上 bpm 本身不大（60~200），
+     precision=0 时直接放 BPM，precision=7 时乘 8 会超出 —— 这是原版的实现，
+     我们照抄，不自行"修正"。 */
+  if (tempoChanger) {
+    /* 原版用 `instrument_list[| first_custom_index]` —— 也就是「第一个自定义乐器」
+       当作变速标记的载体（这种方块在画面上是空白的）。
+       但 first_custom_index 的语义是 INSTRUMENTS.length（没有自定义乐器时等于
+       乐器总数），直接拿去索引会越界。
+       原版能这么用是因为它总是先保证存在一个占位乐器；我们不一定有。
+       所以：有自定义乐器就用它，没有就退回到第一个「用户乐器」，
+       再没有就用 0 —— 只要方块被放下、pitch 带着 BPM，功能就成立。 */
+    let customIns = S.first_custom_index;
+    if (!(customIns >= 0 && customIns < INSTRUMENTS.length)) {
+      const userIns = INSTRUMENTS.findIndex(o => o && o.user);
+      customIns = userIns >= 0 ? userIns : 0;
+    }
+    for (const te of (m.tempoEvents || [])) {
+      let pos = floor((te.tick - base) / deltapertick);
+      if (pos < 0) pos = 0;
+      const pitch = Math.round(te.bpm * (precision + 1));
+      /* 原版先判 song_exists[pos,0]，有则 change_block、无则 add_block。
+         我们这里 addBlock 本身就返回 0 表示"该格已有内容"，
+         所以直接按返回值分支即可。 */
+      if (!addBlock(pos, 0, customIns, 39, 100, 100, pitch, false)) {
+        if (typeof changeBlock === 'function') changeBlock(pos, 0, customIns, 39, 100, 100, pitch);
+      }
+    }
+  }
 
   const maxHeight = Math.max(1, S.midiMaxHeight || 20);
   let placed = 0, skipped = 0;
@@ -210,6 +294,12 @@ function applyMidiImport() {
   S.endb2 = Math.max(S.endb2, S.endb + 1, yy);
 
   // 层名（对照 import_midi 的 w_midi_name 段）
+  /* 有变速层时，第 0 层要叫 "TempoChgr"
+     （对照 import_midi.gml:170-173 `yy += 1; layername[0] = "TempoChgr"`）。
+     注意原版这段是嵌在 `if (w_midi_name = 1)` 里面的 ——
+     也就是说【不勾「给每层命名」时，第 0 层就没有名字】。
+     这是原版行为，照抄。 */
+  if (S.midiNameLayers && tempoChanger) S.layername[0] = 'TempoChgr';
   if (S.midiNameLayers) {
     for (const c of S.midiChannels) {
       const h = channelheight[c.ch] || 0;
@@ -223,19 +313,45 @@ function applyMidiImport() {
     }
   }
 
-  // 速度：与 MIDI 文件一致
-  // 对照 GML import_midi.gml:161
-  //   tempo = median(0.25, 10 / ((midi_songlength) / (enda / 10)), 1000)
-  // 算出来的红石刻经常是 9.718006... 这种长小数，界面上显示不下也没意义，
-  // 按用户要求保留两位小数（四舍五入）。裁剪顺序保持源码一致：先算再 median。
-  if (S.midiTempo) {
-    const len = S.midiMinPos !== undefined ? (S.midiMaxPos - base) : 0;
-    const seconds = (m.tempo / 1e6) * (len / (m.ppq & 0x7fff));
-    endaMax = Math.max(endaMax, S.enda);
-    if (seconds > 0 && endaMax > 0) {
-      const raw = median(0.25, endaMax / seconds, 1000);
-      S.tempo = Math.round(raw * 100) / 100;
+  /* 速度：与 MIDI 文件一致
+     对照 import_midi.gml:158-166 —— 这里有【两条互斥】分支：
+
+       if (!w_midi_tempo_changer || midi_tempo_changers = 0) {
+           if (w_midi_tempo && enda > 0 && midi_songlength > 0) {
+               tempo = median(0.25, 10 / (midi_songlength / (enda / 10)), 1000)
+           }
+       } else {
+           tempo = (midi_tempo_changer_tempo[0] * (w_midi_precision + 1)) / 15
+       }
+
+     也就是：
+       · 没有变速、或文件里根本没有 tempo 事件 → 用「整首时长」反推一个平均速度
+       · 有变速 → 初始速度直接取【第一个】变速事件的 BPM，而不是平均
+     我们原来只有前半段，所以带变速的文件会被按"最后一个 tempo"换算，
+     算出远高于实际的速度 —— 这就是用户说的"放得飞快"。
+
+     还有一处剂量差异：`10 / (songlength / (enda/10))` 等于 `enda / songlength`，
+     和下面写的 `endaMax / seconds` 是一回事，但原版是【先乘 10 再除】，浮点结果
+     略有不同。这里保持等价写法，但把 seconds 的算法对齐到 open_midi.gml:244：
+         midi_songlength = micsecqn * ((maxpos - minpos*removesilent) / ppq) / 1000000
+     其中 micsecqn 是【第一个】tempo 的微秒数（已经在解析器里改成保留第一个了）。 */
+  if (!tempoChanger) {
+    if (S.midiTempo) {
+      const len = S.midiMinPos !== undefined ? (S.midiMaxPos - base) : 0;
+      const seconds = (m.tempo / 1e6) * (len / (m.ppq & 0x7fff));
+      endaMax = Math.max(endaMax, S.enda);
+      if (seconds > 0 && endaMax > 0) {
+        const raw = median(0.25, endaMax / seconds, 1000);
+        S.tempo = Math.round(raw * 100) / 100;
+      }
     }
+  } else {
+    /* 有变速：取第一个事件的 BPM / 15 作为初始速度。
+       注意这里【不乘 precision】—— 原版 import_midi.gml:165 也是这样：
+       存进音符 pitch 的时候乘了 (precision+1)，但设定初始 tempo 时只除以 15。
+       因为 tempo 的单位是"每秒红石刻数"，而 BPM/15 才是 NBS 的换算。 */
+    const firstBpm = m.tempoEvents[0].bpm;
+    S.tempo = Math.round((firstBpm / 15) * 100) / 100;
   }
 
   S.song_name = S.midiName ? S.midiName.replace(/\.[^.]+$/, '') : '';

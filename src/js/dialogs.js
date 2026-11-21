@@ -1358,7 +1358,17 @@ function drawMidiImport() {
   if (drawRadiobox(x1 + 52, y1 + 92, !S.midiNamePatch, '......根据层号', !S.midiNameLayers)) S.midiNamePatch = 0;
 
   // ---- 中间：速度 / 层高 / 八度 / 音量 ----
+  /* 【「导入速度」和「速度变化」是两个独立选项】
+     用户报："导入了带变速的 MIDI，结果放得飞快，并且没有变速"。
+     原版 draw_window_midi_import.gml:52-53 是两个分开的复选框：
+         x1+300  w_midi_tempo          「导入速度」
+         x1+410  w_midi_tempo_changer  「速度变化」
+     我们之前只有前者，后者压根没有 —— 所以哪怕 MIDI 里明明有变速事件，
+     也没有任何入口能把它导进来。
+     这里把两个都摆出来，间距按原版（+300 / +410 相差 110）。
+     注意「速度变化」的提示语是原版原文：Tempo Changer 在游戏里不被支持。 */
   if (drawCheckbox(x1 + 230, y1 + 32, !!S.midiTempo, '导入速度')) S.midiTempo = S.midiTempo ? 0 : 1;
+  if (drawCheckbox(x1 + 340, y1 + 32, !!S.midiTempoChanger, '速度变化')) S.midiTempoChanger = S.midiTempoChanger ? 0 : 1;
   setFont(FONT.small()); setColor(C.textDim);
   text(x1 + 230, y1 + 54, '通道最高层数:');
   setFont(FONT.main());

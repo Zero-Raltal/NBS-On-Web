@@ -67,7 +67,19 @@ function initTextInput() {
 // GML: draw_text_edit(id, str, x, y, w, h, [limit]) -> 返回（可能被编辑后的）字符串
 function textEdit(id, str, x, y, w, h) {
   const focused = UI.textFocus === id;
-  if (!focused && UI.textStr[id] === undefined) UI.textStr[id] = str === undefined ? '' : str;
+  /* 【未聚焦时，缓存必须跟随外部传入的值】
+     原来只有 `UI.textStr[id] === undefined` 时才初始化一次，
+     之后外部改了 str 也不会同步 —— 缓存永远是第一次那个值。
+     踩到的真实后果：MIDI 导入会给层命名（TempoChgr / Piano 1），
+     但 drawLayersPanel 每帧都会 `S.layername[layer] = textEdit(...)` 回写，
+     而 textEdit 返回的是【陈旧缓存里的空串】，于是导入的名字
+     在下一帧就被自己抹掉了。表现为"导入后层名是空的"。
+     （这是我排查「变速 MIDI 没有速度变化层名」时，
+       用 Proxy 拦 layername 的元素写入抓到的调用栈：
+       drawLayersPanel → textEdit，每帧写一次空串。）
+     聚焦时不能同步（用户正在敲，外部变化不该覆盖光标内容），
+     所以只在未聚焦时跟随。 */
+  if (!focused) UI.textStr[id] = str === undefined ? '' : str;
   const val = UI.textStr[id] === undefined ? '' : UI.textStr[id];
   const c = G.ctx;
   c.font = FONT.small();

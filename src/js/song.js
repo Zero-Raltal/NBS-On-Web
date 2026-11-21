@@ -21,6 +21,11 @@ const S = {
   hires: 1, clickinarea: 0, cursmarker: 0, timeline_pressa: -1,
   // MIDI 导入选项（对应 w_midi_* 系列变量）
   midiRemoveSilent: 1, midiNameLayers: 1, midiNamePatch: 1, midiTempo: 1, midiOctave: 0,
+  /* midiTempoChanger：「速度变化」——把 MIDI 里的变速事件也导入（对照 w_midi_tempo_changer）。
+     默认 0：原版 draw_window_midi_import.gml 里 w_midi_tempo_changer 没有在窗口默认值
+     段落里被显式设为 1（只有 w_midi_tempo = 1），且提示语明说游戏内不支持，
+     所以默认关闭，由用户主动勾选。 */
+  midiTempoChanger: 0,
   midiVel: 1, midiPrecision: 1, midiMaxHeight: 20, midiRemember: 1, midiTab: 0,
   midiSb: [0, 0, 0], midiChannels: [], midiPerc: [], midiData: null, midiName: '',
   editmode: 0, mousewheel: 0, changepitch: 1,
