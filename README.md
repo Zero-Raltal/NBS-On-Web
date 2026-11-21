@@ -595,14 +595,52 @@ theme 3 用 `spr_layericons_f` 双层（基帧 + accent 上色层）。
 | `drawMacroBar` | 没画底板；`hover ? 15 : 0` 三元两边相同；漏 alpha 与颜色 | 按 `draw_macroicon.gml` 重写 |
 | `drawMenu` | 不分主题一律圆角 + canvas 阴影；缺图标分隔竖线 | 非 Fluent 直角 + 双线刻痕，Fluent 圆角 |
 | MIDI 导入页签 | 选中态用 24 段、未选中态没画 sprite | 分离两种画法 |
+| `drawIcon`（顶栏按钮） | 完全没画底板，用 Fluent 圆角色块顶替 | 补入 `spr_frame1`（帧 `a + 3*theme + dark*3`） |
+| 顶栏标签页 | 用 Fluent 圆角块顶替 | 补入 `spr_tabframe`（三片式，`+6*theme`） |
+| 速度框 / 小节框 | 手绘 Fluent 圆角白框 | 补入 `spr_tempobox`（3 种框型 × 浅/深） |
+| `drawWindow`（对话框） | 不分主题一律圆角 8 + 阴影 | 非 Fluent 直角 + `spr_interface2` 八帧拼边框 |
 
-**根因是素材缺失**：`spr_volume`、`spr_stereo`、`spr_button` 当时根本没打进图集
-（`ATLAS_SETS` 里没有）。缺素材就只能退而用 `_f` 版，于是"图标混用"无法避免。
-补进 `assets.js` 的 `ATLAS_SETS` 后由 `tools/build-atlas.py` 重新生成图集即可。
+**根因是素材缺失**：`spr_volume`、`spr_stereo`、`spr_button`、`spr_frame1`、
+`spr_tempobox`、`spr_tabframe`、`spr_interface2` 当时大多没打进图集
+（`ATLAS_SETS` 里没有），缺素材就只能用代码手绘 Fluent 等价物，
+于是"图标混用"无法避免。补进 `assets.js` 的 `ATLAS_SETS` 后由
+`tools/build-atlas.py` 重新生成图集即可（64 → 67 张 PNG）。
+
+帧号规律可以用一句话记住：**主题偏移是 `N * theme`，Fluent 深色在
+`theme == 3` 时再加一个 `N`**。所以：
+
+| sprite | 非 Fluent 帧 | Fluent 浅 | Fluent 深 |
+|---|---|---|---|
+| `spr_frame1`（顶栏底板） | `a + 3*theme` | `a + 9` | `a + 12` |
+| `spr_tabframe`（标签页） | `3k + 6*theme` | `3k + 18` | `3k + 24` |
+| `spr_interface2`（窗口边框） | `i + 8*theme` | 不用 | 不用 |
+| `spr_tempobox` | `0` 或 `1` | `2` 或 `3` | `4` 或 `5` |
+| `spr_button` | `m*3 + 12*theme` | 手绘 | 手绘 |
+
+注意 `spr_tempobox` 只有 6 帧，它的"主题"只有两档（非 Fluent / Fluent），
+不是四档 —— 这类帧数少的 sprite 要按实际帧数反推分组，别硬套 `*theme`。
 
 菜单那两条竖线值得单说：`menu_draw.gml:44-49` 在图标区与文字区之间画
 **两条** 1px 线（强调色 @0.25 + 白色），形成一道浅刻痕。少了它，
 非 Fluent 主题的菜单就看不出图标区和文字区的分界。
+
+### 怎么验证这类问题
+
+不要靠截图比对像素（时间文字、光标、抗锯齿都会干扰）。可靠做法是
+**拦一层 `drawSprite`，记录每次调用的 `(sprite, frame)`**，然后断言：
+
+```js
+const log = [];
+const orig = window.drawSprite;
+window.drawSprite = (name, n) => { log.push({name, n}); return orig.apply(this, arguments); };
+// …切主题、画一帧…
+const frames = [...new Set(log.filter(x => x.name === 'spr_frame1').map(x => x.n))];
+// 经典主题下必须全部落在 [0,2]
+```
+
+这样能精确验证"哪个主题用了哪套 sprite、帧号落在哪个区间"，
+而不是只能看出"好像有点不一样"。`tmp/themetest.js` 就是按这个思路写的，
+覆盖 5 个主题变体 × 8 类控件。
 
 ## 长歌曲全选被截断
 

@@ -31,6 +31,12 @@ const ATLAS_SETS = [
      只有 theme 3 才手绘圆角。之前没打这套图，drawButton 只能不分主题地
      手绘 Fluent 圆角按钮，于是经典/复古/暗黑的按钮全是 Fluent 的样子。 */
   'spr_button',
+  /* 非 Fluent 主题的窗口边框（draw_window.gml:36-43）。
+     theme 0/1/2 用 spr_interface2 的 8 帧拼出立体边框：
+       帧 0..7 = 左上角/左边/左下角/底边/右下角/右边/右上角/顶边，
+       每帧再加 8*theme（经典/复古/暗黑三套），Fluent 深色再 +8。
+     Fluent 则走手绘圆角 + spr_shadow（这里用 canvas 阴影等价实现）。 */
+  'spr_interface2',
   'spr_tabbuttons', 'spr_tabsel', 'spr_yesno_f', 'spr_logo', 'spr_bigicons_f',
   'spr_block_shape', 'spr_block_color_shape', 'spr_frame4',
   // 滚动条（原版 spr_scrollbar_* 全套）

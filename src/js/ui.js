@@ -108,18 +108,44 @@ function inputBox(id, str, x, y, w, h) {
 }
 
 /* ============================== 基础控件 ================================= */
+/* 对照 draw_window.gml:5-44 —— 窗口样式是【分主题】的：
+     · theme == 3（Fluent）：圆角 + spr_shadow 外阴影 + 圆角描边，颜色 4144959
+     · theme != 3（经典/复古/暗黑）：直角矩形填充 + spr_interface2 的 8 帧
+       拼出立体边框（帧 0..7 各再 + 8*theme）
+   之前不分主题一律画 Fluent 的圆角 8 + canvas 阴影，
+   所以经典/复古/暗黑下所有对话框都是 Fluent 的圆角卡片。 */
 function drawWindow(x1, y1, x2, y2) {
   const c = G.ctx;
-  // 阴影
-  c.save();
-  c.shadowColor = 'rgba(0,0,0,0.28)';
-  c.shadowBlur = 16;
-  c.shadowOffsetY = 4;
-  setColor(C.dialog);
-  roundRect(x1, y1, x2, y2, 8, true);
-  c.restore();
-  setColor(C.windowBorder);
-  roundRect(x1 + 0.5, y1 + 0.5, x2 - 0.5, y2 - 0.5, 8, false);
+  const isFluent = (S.theme === 3);
+  if (isFluent) {
+    // 阴影
+    c.save();
+    c.shadowColor = 'rgba(0,0,0,0.28)';
+    c.shadowBlur = 16;
+    c.shadowOffsetY = 4;
+    setColor(C.dialog);
+    roundRect(x1, y1, x2, y2, 8, true);
+    c.restore();
+    setColor(C.windowBorder);
+    roundRect(x1 + 0.5, y1 + 0.5, x2 - 0.5, y2 - 0.5, 8, false);
+  } else {
+    /* 非 Fluent：先铺底色（直角），再用 spr_interface2 拼边框。
+       8 帧的排列：0 左上角、1 左边(纵向拉伸)、2 左下角、3 底边(横向拉伸)、
+                   4 右下角、5 右边(纵向拉伸)、6 右上角、7 顶边(横向拉伸)。
+       帧偏移 = 8 * theme（暗黑用第 3 组）。 */
+    setColor(C.dialog);
+    fillRect(x1, y1, x2 - x1, y2 - y1);
+    const b = 8 * S.theme;
+    const W = x2 - x1, H = y2 - y1;
+    drawSprite('spr_interface2', b + 0, x1, y1);
+    drawSprite('spr_interface2', b + 1, x1, y1 + 2, 1, (H - 4) / 2);
+    drawSprite('spr_interface2', b + 2, x1, y2 - 2);
+    drawSprite('spr_interface2', b + 3, x1 + 2, y2 - 2, (W - 4) / 2, 1);
+    drawSprite('spr_interface2', b + 4, x2 - 2, y2 - 2);
+    drawSprite('spr_interface2', b + 5, x2 - 2, y1 + 2, 1, (H - 4) / 2);
+    drawSprite('spr_interface2', b + 6, x2 - 2, y1);
+    drawSprite('spr_interface2', b + 7, x1 + 2, y1, (W - 4) / 2, 1);
+  }
   setColor(C.text);
 }
 function drawWindowTitle(x1, y1, str) {

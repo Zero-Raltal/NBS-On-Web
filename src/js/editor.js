@@ -2246,14 +2246,24 @@ function drawIcon(i, x, y, tip, locked, pressed) {
   const hover = !locked && mouseRectangle(x, y, 25, 25) && !isDialogWindow(S.window);
   if (hover) G.cursor = 'pointer';
   popupSet(x, y, 25, 25, tip);
-  // 按钮底
-  if (pressed || hover) {
-    setColor(pressed ? C.controlBgPress : C.controlBgHover);
-    roundRect(x + 1, y + 1, x + 24, y + 24, 4, true);
-  }
-  if (pressed) {
-    setColor(C.accent);
-    fillRect(x + 6, y + 23, 14, 2);
+  /* 对照 draw_icon.gml:20-29 —— 每个图标按钮都有一块【按主题分派的底板】：
+         a = 鼠标在矩形内（悬停）；再叠一次「按下/刚松开」变成 2
+         按下时：draw_sprite(spr_frame1, 2 + 3*theme + dark*3)
+         否则  ：draw_sprite(spr_frame1, a + 3*theme + dark*3)
+     其中 dark = (theme == 3 && fdark)。spr_frame1 共 15 帧 = 5 组 × 3 主题偏移，
+     所以帧号天然把「经典 / 复古 / 暗黑」三套浮雕分开，Fluent 深色再多 3 帧。
+     之前这里完全没画底板，而是用 Fluent 风格的圆角色块 + 强调色下划线代替 ——
+     于是【所有主题】下的顶栏按钮都是 Fluent 的样子。 */
+  const hoverNow = hover;
+  let a = hoverNow ? 1 : 0;
+  a += ((G.mb[0] || G.mbr[0]) && a) ? 1 : 0;
+  const darkExtra = (S.theme === 3 && S.fdark) ? 3 : 0;
+  const f1 = pressed ? 2 : a;
+  drawSprite('spr_frame1', f1 + 3 * S.theme + darkExtra, x, y);
+  /* Fluent 下按下时额外画一条强调色短下划线（draw_icon.gml:25 spr_tabsel）。
+     非 Fluent 主题【没有】这道下划线，用底板浮雕本身表达按下状态。 */
+  if (pressed && S.theme === 3) {
+    drawSprite('spr_tabsel', 1, x + 5, y + 23, 1, 1, T.accent[4]);
   }
   setAlpha(locked ? 0.4 : 1);
   // 按主题分派图集（Fluent 与非 Fluent 是两套完全不同的图标，不能混用）
@@ -2295,16 +2305,25 @@ function drawTopBar() {
   let tabx = 1;
   const tabX = {};
   setFont(FONT.small());
+  /* 对照 draw_tab.gml:8-17 —— 标签页是三片式 sprite（左 / 中拉伸 / 右），
+     帧号 = 0/1/2 + 3*(a==2 || ismenu) + 6*theme + 6*(fdark && theme==3)：
+       · 基础组 0-2   = 普通
+       · 3-5          = 按下或该菜单已展开
+       · 每组再按 theme 偏移 6，Fluent 深色再 +6
+     之前这里不分主题一律画 Fluent 圆角块 + 纯色填充，
+     所以经典/复古/暗黑的菜单标签页长得和 Fluent 一样。 */
   const tab = (label, name) => {
     const w = textWidth(label) + 14;
     const x = tabx; tabx += w;
     tabX[label] = x;
     const hover = mouseRectangle(x, 1, w, 18) && !isDialogWindow(S.window);
     const active = UI.menu && UI.menu.name === name;
-    if (hover || active) {
-      setColor(active ? (C.dark ? '#3a3a3a' : '#ffffff') : (C.dark ? '#333333' : '#eaeaea'));
-      roundRect(x, 1, x + w, 19, 0, true);
-    }
+    const a = (hover && G.mb[0]) || active ? 2 : 0;
+    const tabDark = (S.theme === 3 && S.fdark) ? 6 : 0;
+    const tb = 3 * (a === 2 ? 1 : 0) + 6 * S.theme + tabDark;
+    drawSprite('spr_tabframe', tb, x, 1);
+    drawSprite('spr_tabframe', tb + 1, x + 3, 1, (w - 6) / 3, 1);
+    drawSprite('spr_tabframe', tb + 2, x + w - 3, 1);
     setColor(C.text);
     text(x + 7, 4, label);
     // 菜单打开时仍允许点击其它标签切换（使用未被屏蔽的原始输入）
@@ -2593,11 +2612,18 @@ function drawInfoBoxes() {
   text(S.theme === 3 ? 26 : 93 - 67, ty(69), '/ ' + timeStr(S.enda / S.tempo));
   setFont(FONT.main());
 
+  /* 这两个框在原版是 sprite，不是手绘矩形。对照 control_draw.gml:2265/2282 ——
+         draw_sprite(spr_tempobox, 2*(theme==3) + 2*(fdark && theme==3), 184, 57)
+     帧号只有两种：非 Fluent 用 0（或 2），Fluent 用 2（或 4）。
+     spr_tempobox 共 6 帧 = 3 种框型 × 2 个主题变体（浅/深）。
+     之前这里不分主题一律画 Fluent 圆角白框，所以经典/复古/暗黑下
+     「小节.拍.十六分」和「速度」两个框都是 Fluent 的样子。
+     Fluent 深色变体在 +2 的基础上再加 2（共 6 帧，索引 0..5）。 */
+  const tboxDark = (S.theme === 3 && S.fdark) ? 2 : 0;
+  const tboxFluent = (S.theme === 3) ? 2 : 0;
+
   // 小节.拍.十六分
-  setColor(C.dark ? '#2f2f2f' : '#ffffff');
-  roundRect(184, ty(57), 248, ty(79), 4, true);
-  setColor(C.controlBorder);
-  roundRect(184.5, ty(57.5), 247.5, ty(78.5), 4, false);
+  drawSprite('spr_tempobox', tboxFluent + tboxDark, 184, ty(57));
   setFont(FONT.small());
   setColor(C.text);
   text(240, ty(61), floor(S.marker_pos / (S.timesignature * 4)) + 1, 'right');
@@ -2609,10 +2635,9 @@ function drawInfoBoxes() {
 
   // 速度框
   const useBpm = S.use_bpm;
-  setColor(C.dark ? '#2f2f2f' : '#ffffff');
-  roundRect(108, ty(57), 108 + 64, ty(79), 4, true);
-  setColor(S.window === W_SETTEMPO ? C.accent : C.controlBorder);
-  roundRect(108.5, ty(57.5), 171.5, ty(78.5), 4, false);
+  /* 对照 control_draw.gml:2279-2283 —— BPM 模式用帧 1，t/s 模式用帧 0
+     （都再叠加 Fluent/深色的偏移）。 */
+  drawSprite('spr_tempobox', (useBpm ? 1 : 0) + tboxFluent + tboxDark, 108, ty(57));
   setFont(FONT.small());
   setColor(C.text);
   const bpm = S.tempo * 15;
@@ -2620,6 +2645,12 @@ function drawInfoBoxes() {
   popupSet(108, ty(57), 64, 22, useBpm ? '歌曲的速度（拍数/分钟）\n拖拽来大致更改，点击来手动输入，右键查看更多选项。'
     : '歌曲的速度（红石刻/秒）\n拖拽来大致更改，点击来手动输入，右键查看更多选项。');
   setFont(FONT.main());
+  /* 正在手动输入速度时用强调色描一圈，作为「这个框处于编辑态」的提示。
+     这是 web 版新增的反馈（原版此时会画输入光标），用 C.accent 而非硬编码色。 */
+  if (S.window === W_SETTEMPO) {
+    setColor(C.accent);
+    roundRect(108.5, ty(57.5), 171.5, ty(78.5), 4, false);
+  }
   if (mouseRectangle(108, ty(57), 64, 22) && !isDialogWindow(S.window)) {
     G.cursor = 'pointer';
     if (G.mbr[0]) { S.window = W_SETTEMPO; focusText(64, String(S.tempo)); UI.inputWindow = W_SETTEMPO; UI.textEnter = () => commitTempo(); }
