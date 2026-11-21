@@ -250,7 +250,21 @@ function button2(x, y, w, label, locked) {
   if (r && S.windowsound) playUISound('invoke');
   return r;
 }
-function drawCheckbox(x, y, state, label, locked) {
+function drawCheckbox(x, y, state, label, locked, isSwitch) {
+  /* 第 6 个参数 isSwitch 对照 draw_checkbox.gml:13-18：
+         if (theme == 3 && argument_count > 6) is_switch = argument[6];
+         else is_switch = false;
+         x_offset = is_switch ? 31 : 18;
+     也就是说【只有 Fluent(theme 3) 才可能画成开关】，其它主题即使传了 true 也当普通复选框。
+
+     【这是之前完全没实现的东西】
+       原版 Fluent 主题下，一部分勾选项画成长条形的开关（toggle），
+       而不是方框复选框。调用方通过第 6 个参数指定，全工程有 22 处传了 true，
+       例如「记住我的更改」「包含锁定图层」「启用循环」「双倍速度」。
+       我们这边之前没有这个参数，全部按复选框画，所以 Fluent 下
+       本该是开关的地方都成了方框 —— 用户看到的「样式不对」。 */
+  const sw = S.theme === 3 && !!isSwitch;
+  const xOff = sw ? 31 : 18;      // 开关宽 26（xx-1 .. xx+25），文字要右移
   const w = 13 + textWidth(label) + 8;
   const hover = !locked && mouseRectangle(x, y, w, 13);
   const c = G.ctx;
@@ -297,6 +311,48 @@ function drawCheckbox(x, y, state, label, locked) {
     setColor(locked
       ? ((S.theme === 1 || S.theme === 2) ? '#ffffff' : make_color_rgb(204, 204, 204))
       : ((S.theme === 2 || (S.theme === 3 && S.fdark)) ? '#ffffff' : '#000000'));
+  } else if (sw) {
+    /* Fluent 开关（toggle）—— 严格照 draw_checkbox.gml:108-140 / 55-76。
+       几何：轨道 draw_roundrect_ext(xx-1, yy-1, xx+25, yy+12, 12, 12, 填充)
+             圆角半径 12 = 轨道半高，画成胶囊形。
+       锁定态（gml:55-76）用另一套灰度，且滑块位置固定、不响应悬停。 */
+    const m = hover ? (G.mb[0] ? 2 : 1) : 0;
+    const gray = (v) => make_color_rgb(v, v, v);
+    if (locked) {
+      /* 锁定：轨道底色按勾选/未勾选取灰，再把滑块画成小圆。
+         对照 gml:58-63 的取色：
+           深色：勾选 3355443(51) / 未勾选 0
+           浅色：勾选 14935011(228) / 未勾选 15987699(243)
+         滑块（gml:69-75）：
+           勾选 深色 5000268(76) / 浅色 13421772(204)
+           未勾选 深色 3684408(56) / 浅色 13092807(200) */
+      setColor(S.fdark ? gray(state ? 51 : 0) : gray(state ? 228 : 243));
+      roundRect(x - 1, y - 1, x + 25, y + 12, 12, true);
+      // 轨道描边（gml:65-67 未勾选时描一圈）
+      if (!state) {
+        setColor(S.fdark ? gray(56) : gray(200));
+        roundRect(x, y, x + 24, y + 11, 6, false);
+      }
+      setColor(S.fdark ? gray(state ? 76 : 56) : gray(state ? 204 : 200));
+      if (state) roundRect(x + 15, y + 3, x + 22, y + 10, 3, true);
+      else roundRect(x + 2, y + 2, x + 9, y + 9, 3, true);
+      setColor(gray(204));
+    } else {
+      /* 正常态轨道底色（gml:111-127）：
+           勾选 → accent[5 + 2*(m==1) + 3*(m==2)]
+           未勾选 深色 2105376(32) / 2763306(42) / 3158064(48) 对应 m=0/1/2
+                  浅色 15987699(243) / 15066597(229) / 14474460(220) */
+      if (state) setColor(T.accent[5 + 2 * (m === 1) + 3 * (m === 2)]);
+      else if (S.fdark) setColor(gray(m === 0 ? 32 : m === 1 ? 42 : 48));
+      else setColor(gray(m === 0 ? 243 : m === 1 ? 229 : 220));
+      roundRect(x - 1, y - 1, x + 25, y + 12, 12, true);
+      // 滑块（gml:132-140）：勾选在右端且深色 2105376(32)/浅色 15987699(243)
+      setColor(S.fdark ? gray(state ? 32 : 243) : gray(state ? 243 : 32));
+      if (state) roundRect(x + 15 - (m === 2 ? 1 : 0), y + 2, x + 22, y + 9, 3, true);
+      else roundRect(x + 2, y + 2, x + 9 + (m === 2 ? 1 : 0), y + 9, 3, true);
+      // 文字色：Fluent 正常态发挥 draw_theme_color() 的规则
+      setColor((S.fdark) ? '#ffffff' : '#000000');
+    }
   } else {
     // Fluent 普通复选框，严格照 draw_checkbox.gml:142-182 的顺序：
     //   ① 填充：勾选 → accent[5 + 2*(m==1) + 3*(m==2)]
@@ -336,7 +392,8 @@ function drawCheckbox(x, y, state, label, locked) {
     setColor(locked ? C.textDim : C.text);
   }
   setFont(FONT.main());
-  text(x + 18, y - 1, label);
+  // 开关宽 26，文字要从开关右侧 31 处开始，否则会压在轨道上
+  text(x + xOff, y - 1, label);
   return !locked && hover && G.mbr[0];
 }
 function drawRadiobox(x, y, state, label, locked) {

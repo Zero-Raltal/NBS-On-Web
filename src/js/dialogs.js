@@ -648,7 +648,7 @@ function drawProperties() {
   const ts = drawDragValue(12, f.x1 + 200, f.y1 + 68, S.timesignature, 0.1);
   S.timesignature = clamp(Math.round(ts), 2, 8);
   text(f.x1 + 16, f.y1 + 108, '循环设置');
-  if (drawCheckbox(f.x1 + 200, f.y1 + 106, !!S.loop_session, '循环播放')) { S.loop_session = S.loop_session ? 0 : 1; S.loop = S.loop_session; }
+  if (drawCheckbox(f.x1 + 200, f.y1 + 106, !!S.loop_session, '循环播放', false, true)) { S.loop_session = S.loop_session ? 0 : 1; S.loop = S.loop_session; }
   text(f.x1 + 16, f.y1 + 136, '循环起点');
   const ls = drawDragValue(13, f.x1 + 200, f.y1 + 132, S.loopstart, 0.1);
   S.loopstart = clamp(Math.round(ls), 0, Math.max(0, S.enda));
@@ -1591,7 +1591,7 @@ function drawMidiImport() {
   }
 
   // ---- 底部 ----
-  if (drawCheckbox(x1 + 12, y1 + 374, !!S.midiRemember, '记住我的更改')) S.midiRemember = S.midiRemember ? 0 : 1;
+  if (drawCheckbox(x1 + 12, y1 + 374, !!S.midiRemember, '记住我的更改', false, true)) S.midiRemember = S.midiRemember ? 0 : 1;
   if (button2(x1 + 360, y1 + 368, 72, '使用默认值')) midiUseDefaults();
   const ok = button2(x1 + 520, y1 + 368, 72, '导入');
   if (button2(x1 + 440, y1 + 368, 72, '取消') || G.keysPressed['Escape']) { S.window = 0; }
@@ -1700,7 +1700,7 @@ function drawPortamentoDlg() {
   if (S.selected === 0) { closeWindow(); return; }
   const f = macroDialogBase(280, 180, 'Portamento');
   setFont(FONT.main());
-  if (drawCheckbox(f.x1 + 16, f.y1 + 42, !!S.porta_reverse, '反向')) S.porta_reverse = S.porta_reverse ? 0 : 1;
+  if (drawCheckbox(f.x1 + 16, f.y1 + 42, !!S.porta_reverse, '反向', false, true)) S.porta_reverse = S.porta_reverse ? 0 : 1;
   setFont(FONT.small()); setColor(C.textDim);
   text(f.x1 + 16, f.y1 + 68, '滑音范围（微分）');
   setFont(FONT.main());
@@ -1723,7 +1723,7 @@ function drawSetVelDlg() {
   if (S.selected === 0) { closeWindow(); return; }
   const f = macroDialogBase(280, 180, '设定音量');
   setFont(FONT.main());
-  if (drawCheckbox(f.x1 + 16, f.y1 + 42, !!S.percentvel, '按百分比修改')) S.percentvel = S.percentvel ? 0 : 1;
+  if (drawCheckbox(f.x1 + 16, f.y1 + 42, !!S.percentvel, '按百分比修改', false, true)) S.percentvel = S.percentvel ? 0 : 1;
   setFont(FONT.small()); setColor(C.textDim);
   text(f.x1 + 16, f.y1 + 68, S.percentvel ? '百分比' : '音量（0-100）');
   setFont(FONT.main());

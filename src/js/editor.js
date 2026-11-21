@@ -1202,15 +1202,35 @@ function drawEditor(dt) {
   // 选区
   if (S.selected > 0) selectionDraw(gx, gy, totalcols, totalrows);
 
-  // 拖选矩形
+  /* 拖选矩形 —— 对照 control_draw.gml:976-995。
+     关键点：GML 里【填充和描边用的是同一个颜色】，中间只改 alpha：
+         draw_set_color(c_blue)              // select=2 时 c_red；theme=3 时 14120960
+         draw_set_alpha(0.25); draw_rectangle(..., 0)   // 填充
+         draw_set_alpha(1);    draw_rectangle(..., 1)   // 描边
+     之前的写法在描边前把颜色换成了 C.accent —— 于是填充是蓝、描边是主题高亮蓝
+     （Fluent 下还偏青），两者不是同一个颜色，看起来就是"选择框的颜色不对"。
+     现在统一用一个 col 变量，只改 alpha。
+
+     颜色值也按 GML 校准：
+       · 非 Fluent：c_blue = #0000ff
+       · Fluent   ：14120960 = 0xD77800。GameMaker 的颜色是【BGR】打包，
+                    所以 0xD77800 → R=0x00, G=0x78, B=0xD7 → RGB(0,120,215)
+                    = #0078D7，也就是 Fluent 的那支标准蓝。
+                    （之前这里写成 make_color_rgb(0xD7,0x78,0x00)，
+                     把 BGR 当成 RGB 读，算出一个橙色，完全错了。）
+       · 反选（select = 2）：c_red = #ff0000，任何主题都一样 */
   if (S.select > 0) {
-    setColor(S.select === 2 ? COL.red : (S.theme === 3 ? '#d77800' : '#0000e0'));
-    setAlpha(0.25);
+    const col = (S.select === 2) ? '#ff0000'
+      : (S.theme === 3 ? '#0078d7' : '#0000ff');
     const x2 = S.starta === 0 ? Math.max(gx, G.mouse.x) : G.mouse.x;
     const y2 = S.startb === 0 ? Math.max(gy, G.mouse.y) : G.mouse.y;
+    setColor(col);
+    setAlpha(0.25);
     fillRect(S.select_pressx, S.select_pressy, x2 - S.select_pressx, y2 - S.select_pressy);
     setAlpha(1);
-    setColor(S.select === 2 ? COL.red : C.accent);
+    // 描边沿用同一个颜色（GML 没有重新设色）
+    setColor(col);
+    G.ctx.lineWidth = 1;
     G.ctx.strokeRect(S.select_pressx + 0.5, S.select_pressy + 0.5, x2 - S.select_pressx, y2 - S.select_pressy);
   }
 

@@ -1808,7 +1808,7 @@ function drawSchematicExport() {
   setFont(FONT.main());
 
   // 记住我的更改
-  if (drawCheckbox(x1 + 12, y1 + 374, !!S.sch_exp_remember, '记住我的更改')) {
+  if (drawCheckbox(x1 + 12, y1 + 374, !!S.sch_exp_remember, '记住我的更改', false, true)) {
     S.sch_exp_remember = S.sch_exp_remember ? 0 : 1;
   }
 
@@ -1861,10 +1861,10 @@ function drawSchematicExport() {
       Math.round(drawDragValue(5, lx + 300, y1 + 216, S.sch_exp_notesperrow, 1)), 5, 100);
     if (S.sch_exp_notesperrow < 5) S.sch_exp_notesperrow = 5;
 
-    if (drawCheckbox(lx + 170, y1 + 240, !!S.sch_exp_includelocked, '包含锁定图层')) {
+    if (drawCheckbox(lx + 170, y1 + 240, !!S.sch_exp_includelocked, '包含锁定图层', false, true)) {
       S.sch_exp_includelocked = S.sch_exp_includelocked ? 0 : 1;
     }
-    if (drawCheckbox(lx + 170, y1 + 260, !!S.sch_exp_compress, '压缩图层')) {
+    if (drawCheckbox(lx + 170, y1 + 260, !!S.sch_exp_compress, '压缩图层', false, true)) {
       S.sch_exp_compress = S.sch_exp_compress ? 0 : 1;
     }
     // 以下 y 坐标照 GML：
@@ -1872,20 +1872,20 @@ function drawSchematicExport() {
     //   玻璃地板（非两种过道布局时）y1+290
     // 之前矿车写成 y1+262 与「压缩图层」(y1+260) 只差 2px，两个勾选框糊在一起了。
     if (S.sch_exp_layout === 0 || S.sch_exp_layout === 1) {
-      if (drawCheckbox(lx + 170, y1 + 280, !!S.sch_exp_minecart, '包含矿车道')) {
+      if (drawCheckbox(lx + 170, y1 + 280, !!S.sch_exp_minecart, '包含矿车道', false, true)) {
         S.sch_exp_minecart = S.sch_exp_minecart ? 0 : 1;
       }
       if (drawCheckbox(lx + 186, y1 + 300, !!S.sch_exp_chest, '附带一箱矿车', !S.sch_exp_minecart)) {
         S.sch_exp_chest = S.sch_exp_chest ? 0 : 1;
       }
       if (S.sch_exp_layout === 0) {
-        if (drawCheckbox(lx + 170, y1 + 320, !!S.sch_exp_loop, '包含循环开关')) {
+        if (drawCheckbox(lx + 170, y1 + 320, !!S.sch_exp_loop, '包含循环开关', false, true)) {
           S.sch_exp_loop = S.sch_exp_loop ? 0 : 1;
         }
       }
       if (S.structure) {
         const cbY = y1 + 320 + (S.sch_exp_layout === 0 ? 20 : 0);
-        if (drawCheckbox(lx + 170, cbY, !!S.command_block, '使用命令方块')) {
+        if (drawCheckbox(lx + 170, cbY, !!S.command_block, '使用命令方块', false, true)) {
           S.command_block = !S.command_block;
         }
       }
@@ -2120,19 +2120,19 @@ function drawDatapackExport() {
     if (drawRadiobox(x1 + 192, y1 + 374, S.dat_mcversion === 1, '1.21+')) S.dat_mcversion = 1;
 
     // 导出为 ZIP（浏览器里只能出 ZIP，仍画出来并保持可勾选，值恒为 1）
-    if (drawCheckbox(x1 + 192, y1 + 404, true, '导出为 ZIP')) S.dat_usezip = 1;
+    if (drawCheckbox(x1 + 192, y1 + 404, true, '导出为 ZIP', false, true)) S.dat_usezip = 1;
     S.dat_usezip = 1;
 
     // 锁定图层
-    if (drawCheckbox(x1 + 362, y1 + 213, !!S.dat_includelocked, '包含锁定图层')) {
+    if (drawCheckbox(x1 + 362, y1 + 213, !!S.dat_includelocked, '包含锁定图层', false, true)) {
       S.dat_includelocked = S.dat_includelocked ? 0 : 1;
     }
     // 超范围音符
-    if (drawCheckbox(x1 + 362, y1 + 238, !!S.dat_includeoutofrange, '包含超范围音符')) {
+    if (drawCheckbox(x1 + 362, y1 + 238, !!S.dat_includeoutofrange, '包含超范围音符', false, true)) {
       S.dat_includeoutofrange = S.dat_includeoutofrange ? 0 : 1;
     }
     // 附近收听
-    if (drawCheckbox(x1 + 362, y1 + 263, !!S.dat_enableradius, '附近收听')) {
+    if (drawCheckbox(x1 + 362, y1 + 263, !!S.dat_enableradius, '附近收听', false, true)) {
       S.dat_enableradius = S.dat_enableradius ? 0 : 1;
     }
     if (S.dat_enableradius) {
@@ -2146,7 +2146,7 @@ function drawDatapackExport() {
     text(x1 + 380, y1 + 283, '半径（方块）：');
 
     // 循环
-    if (drawCheckbox(x1 + 362, y1 + 313, !!S.dat_enablelooping, '启用循环')) {
+    if (drawCheckbox(x1 + 362, y1 + 313, !!S.dat_enablelooping, '启用循环', false, true)) {
       S.dat_enablelooping = S.dat_enablelooping ? 0 : 1;
     }
     if (S.dat_enablelooping) {
@@ -2169,7 +2169,7 @@ function drawDatapackExport() {
     drawSprite('spr_datapack_exp', 1, x1 + 125, y1 + 55);
     popClip();
 
-    if (drawCheckbox(x1 + 33, y1 + 55, !!S.dat_visualizer, '启用可视化')) {
+    if (drawCheckbox(x1 + 33, y1 + 55, !!S.dat_visualizer, '启用可视化', false, true)) {
       S.dat_visualizer = S.dat_visualizer ? 0 : 1;
     }
     text(x1 + 33, y1 + 75, '可视化类型');
@@ -2222,7 +2222,7 @@ function drawDatapackExport() {
   if (button2(x1 + 310, y1 + 398, 72, '使用默认值')) {
     confirmDialogOn((yes) => { if (yes) datReset(1); }, '你确定吗？', '确定');
   }
-  if (drawCheckbox(x1 + 12, y1 + 404, !!S.dat_remember, '记住我的更改')) {
+  if (drawCheckbox(x1 + 12, y1 + 404, !!S.dat_remember, '记住我的更改', false, true)) {
     S.dat_remember = S.dat_remember ? 0 : 1;
   }
 }
