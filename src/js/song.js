@@ -14,6 +14,9 @@ const S = {
   show_layers: 1, show_piano: 1, show_keynames: 1, show_keynumbers: 0,
   show_keyboard: 1, show_notechart: 0, show_outofrange: 1, show_octaves: 0,
   show_numbers: 1, use_colors: 1, use_icons: 0, use_shapes: 0, show_incompatible: 1,
+  /* fade：音符盒不透明（首选项「外观」页）。对照 control_create.gml:131 `fade = 0`。
+     默认 0 = 按力度渐变；设 1 = 全部不透明。 */
+  fade: 0,
   show_soundcount: 0,
   hires: 1, clickinarea: 0, cursmarker: 0, timeline_pressa: -1,
   // MIDI 导入选项（对应 w_midi_* 系列变量）

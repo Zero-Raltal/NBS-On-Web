@@ -56,6 +56,38 @@ const SETTINGS_FIELDS = [
   // 输入
   'changepitch', 'mousewheel', 'select_lastpressed', 'keysshow', 'startkey',
   'keynames_flat', 'sharpkeys',
+  /* keysmax —— 钢琴显示多少个琴键（首选项「外观」页的滑块，范围 20-50）。
+     用户报："琴键数量好像没有被写入本地配置，刷新了一下就丢失"。
+     对照 save_settings.gml:41  `keys_to_show` → keysmax，
+     它属于 preferences 段，原版是存的。我们漏了。
+     这个字段、以及下面 27 个，都是同类问题：功能做了、界面能改，
+     但没进这份清单，于是刷新即丢。
+     我是用 tmp/cmp_settings.js 拿原版 save_settings.gml 的 109 项
+     逐条比对出来的，不是靠猜。 */
+  'keysmax',
+  // 主题/显示
+  'use_colors',
+  /* fade —— 音符盒不透明（save_settings.gml 的 use_fading）。
+     这个字段之前连默认值都没有，是个死控件；顺带补上默认值与渲染读取。 */
+  'fade',
+  /* tapdouble —— 速度测量器的「双倍速度」（save_settings.gml:62）。
+     上一轮刚移植的功能，忘了同步加到持久化清单里。 */
+  'tapdouble',
+  /* structure —— 结构方块后方的草稿区显示（schematic 导出相关，懒初始化）。 */
+  'structure',
+  // MIDI 导入
+  'midiMaxHeight', 'midiPrecision',
+  /* 存档导出（schematic / datapack）的全部选项。
+     对照 save_settings.gml 的 [schematic_export] / [branch_export] /
+     [datapack_export] 三个段。这些变量在我们的 schematic.js 里
+     是惰性初始化的（`if (S.x === undefined) S.x = 默认值`），
+     值都是布尔或数字，序列化安全。 */
+  'sch_exp_layout', 'sch_exp_notesperrow', 'sch_exp_glass', 'sch_exp_chest',
+  'sch_exp_minecraft_old', 'command_block',
+  'sch_exp_stereo', 'sch_exp_velocity', 'sch_exp_circuitry', 'sch_exp_vertical',
+  'sch_exp_polyphony', 'sch_exp_layer1', 'sch_exp_layer2', 'sch_exp_layer3',
+  'sch_exp_range_start', 'sch_exp_range_end',
+  'dat_mcversion', 'dat_radius', 'dat_glow', 'dat_xval', 'dat_yval', 'dat_zval',
   // 音符默认值（首选项「外观」页的 音量/声像/音高 等）
   'setvel', 'setpan', 'setpit', 'percentvel',
   // 自动化预设（琶音 / 颤音 / 断奏）
@@ -80,7 +112,18 @@ const SETTINGS_FIELDS = [
 
 function saveSettings() {
   const o = {};
-  for (const k of SETTINGS_FIELDS) o[k] = S[k];
+  for (const k of SETTINGS_FIELDS) {
+    /* 【undefined 不能直接存】
+       JSON.stringify 会直接丢掉值为 undefined 的键 —— 存进去等于没存，
+       而且下次 loadSettings 也读不到，静默失败、很难察觉。
+       这类字段大多是"惰性初始化"的（例如 S.sch_exp_layout 要等用户
+       打开过一次存档导出窗口才被赋值），所以确实可能在这一刻是 undefined。
+       这里跳过它们：等字段真正有了值，下一次 saveSettings 自然会存上。
+       （不要写 null：null 读回来会把 S.keysmax 之类变成 null，
+         参与 min/clamp 运算时会算成 0，比 undefined 更糟。） */
+    if (S[k] === undefined) continue;
+    o[k] = S[k];
+  }
   o.piano_key = S.piano_key;
   try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(o)); } catch (e) { }
 }

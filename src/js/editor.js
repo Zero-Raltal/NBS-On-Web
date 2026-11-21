@@ -1200,7 +1200,16 @@ function drawEditor(dt) {
       if (layer < colfirst[col] || layer > collast[col]) continue;
       if (!gExists(col, layer)) continue;
       const i = gidx(col, layer);
-      let alpha = 0.5 * (gVel(col, layer) / 100) + 0.25;
+      /* 【fade：音符盒是否"不透明"】
+         对照 control_draw.gml:398 `if (fade = 0) c = 0.5 * (song_vel/100) + 0.25`。
+         fade = 0（默认）时，音符框的透明度跟着力度走：力度越大越实、越小越淡；
+         fade = 1 时固定不透明，所有音符一样实。
+         之前这里【无条件】按力度算 alpha，而首选项里的「音符盒不透明」
+         这个复选框虽然画出来了、也能点，但 S.fade 从未被定义、
+         更没被任何渲染代码读取 —— 是个纯死控件。
+         （这是排查「琴键数量存不住」时顺手发现的：fade 也漏在持久化清单之外，
+           顺着查下去才发现它连默认值和读取处都没有。） */
+      let alpha = (S.fade ? 1 : 0.5 * (gVel(col, layer) / 100) + 0.25);
       if (S.lockedlayer[layer] === 0) {
         /* 亮度按「该音发声之后过了多久」衰减：刚响时 +0.5，1 秒后回到 0。
            由于排期是提前做的（scheduleAhead 会提前 0.25~1.5 秒），
