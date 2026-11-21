@@ -1373,34 +1373,50 @@ function drawMidiImport() {
   //                             选中页签是同色块 + 底色
   //   theme 1（复古）：列表底铺白 + draw_area 立体边框，页签用 spr_tabbuttons 24/25/26
   //   其余（暗黑）：c_dark 深灰底 + 灰边框
+  /* 对照 draw_window_midi_import.gml:105-118 与 140-144 —— 页签是【两种画法叠加】：
+       · 未选中的页签（第 111-113 行）：spr_tabbuttons 三片，
+         帧 = 0/1/2 + 3*c + 6*theme + 9*(fdark && theme==3)，c 是 hover 标志；
+       · 选中的页签（第 140-144 行）：theme 1 用 24/25/26 三片盖在上面，
+         theme 0/3/2 则用色块 + 边框。
+     之前的实现把两者混在一起：选中态用了 24 段，而未选中态【根本没画 sprite】，
+     导致非选中页签在经典/复古/暗黑主题下是一块无样式的色块 ——
+     页签风格与主题完全不搭。 */
   let bx = x1 + 8;
   MIDI_TABS.forEach((label, i) => {
     const tw = textWidth(label) + 16;
     const hover = mouseRectangle(bx, y1 + 128, tw, 18);
     const on = (S.midiTab === i);
-    if (S.theme === 3) {
-      // Fluent：选中项是一块浅色圆角，未选中透明
-      if (on) {
+    if (!on) {
+      /* 未选中：Fluent 走圆角描边，其余三主题走 spr_tabbuttons 三片。 */
+      if (S.theme === 3) {
+        setColor(C.controlBorder);
+        roundRect(bx + 0.5, y1 + 128.5, bx + tw - 0.5, y1 + 145.5, 4, false);
+      } else {
+        const bb = 0 + 3 * (hover ? 1 : 0) + 6 * S.theme;
+        drawSprite('spr_tabbuttons', bb, bx, y1 + 128);
+        drawSprite('spr_tabbuttons', bb + 1, bx + 2, y1 + 128, (tw - 4) / 2, 1);
+        drawSprite('spr_tabbuttons', bb + 2, bx + tw - 2, y1 + 128);
+      }
+    } else {
+      /* 选中：theme 1 → 24/25/26 三片立体页签；theme 0/2/3 → 与列表同色的块。 */
+      if (S.theme === 1) {
+        drawSprite('spr_tabbuttons', 24, bx - 1, y1 + 126);
+        drawSprite('spr_tabbuttons', 25, bx + 1, y1 + 126, (tw + 2) / 2 - 1, 1);
+        drawSprite('spr_tabbuttons', 26, bx + tw - 1, y1 + 126);
+      } else if (S.theme === 3) {
         setColor(S.fdark ? '#414141' : '#f3f3f3');
         roundRect(bx, y1 + 128, bx + tw, y1 + 146, 4, true);
+        setColor(C.controlBorder);
+        roundRect(bx + 0.5, y1 + 128.5, bx + tw - 0.5, y1 + 145.5, 4, false);
+      } else {
+        setColor(S.theme === 2 ? '#303030' : '#ffffff');
+        fillRect(bx, y1 + 128, tw, 18);
+        setColor(make_color_rgb(137, 140, 149));
+        fillRect(bx, y1 + 128, tw, 1);
+        fillRect(bx, y1 + 145, tw, 1);
+        fillRect(bx, y1 + 128, 1, 18);
+        fillRect(bx + tw - 1, y1 + 128, 1, 18);
       }
-      setColor(C.controlBorder);
-      roundRect(bx + 0.5, y1 + 128.5, bx + tw - 0.5, y1 + 145.5, 4, false);
-    } else if (S.theme === 1) {
-      // 复古：用 spr_tabbuttons 的 24/25/26 三片（左/中拉伸/右）
-      const tb = 24 + (on ? 0 : 3);
-      drawSprite('spr_tabbuttons', tb, bx, y1 + 128);
-      drawSprite('spr_tabbuttons', tb + 1, bx + 2, y1 + 128, (tw - 4) / 2, 1);
-      drawSprite('spr_tabbuttons', tb + 2, bx + tw - 2, y1 + 128);
-    } else {
-      // 经典 / 暗黑：矩形色块
-      setColor(on ? C.controlBg : (hover ? C.controlBgHover : C.headerBg));
-      fillRect(bx, y1 + 128, tw, 18);
-      setColor(C.controlBorder);
-      fillRect(bx, y1 + 128, tw, 1);
-      fillRect(bx, y1 + 145, tw, 1);
-      fillRect(bx, y1 + 128, 1, 18);
-      fillRect(bx + tw - 1, y1 + 128, 1, 18);
     }
     setColor(on ? C.text : C.textDim);
     setFont(on ? FONT.mainbold() : FONT.main());

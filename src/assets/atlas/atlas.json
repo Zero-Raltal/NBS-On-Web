@@ -209,6 +209,21 @@
   "h": 10,
   "frames": 7
  },
+ "spr_volume": {
+  "w": 12,
+  "h": 10,
+  "frames": 4
+ },
+ "spr_stereo": {
+  "w": 12,
+  "h": 10,
+  "frames": 5
+ },
+ "spr_button": {
+  "w": 3,
+  "h": 23,
+  "frames": 72
+ },
  "spr_tabbuttons": {
   "w": 2,
   "h": 21,

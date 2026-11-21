@@ -154,33 +154,47 @@ function drawButton(x, y, w, h, label, locked) {
   const hover = !locked && mouseRectangle(x, y, w, h) && !UI.menu;
   const pressed = hover && G.mb[0];
   const c = G.ctx;
-  const is90 = S.theme === 1;
-  if (is90) {
-    // 底部填充分面。
-    setColor(locked ? THEME90.faceLock : (pressed ? THEME90.facePress : (hover ? THEME90.faceHover : THEME90.face)));
-    fillRect(x, y, w, h);
-    // 左上亮边（2px 白 + 1px 浅灰，和源图 f12 一致）
-    setColor(THEME90.hi);
-    fillRect(x, y, w, 1); fillRect(x, y, 1, h);
-    setColor(THEME90.hiMid);
-    fillRect(x + 1, y + 1, w - 2, 1); fillRect(x + 1, y + 1, 1, h - 2);
-    // 右下暗边
-    setColor(THEME90.lo);
-    fillRect(x, y + h - 1, w, 1); fillRect(x + w - 1, y, 1, h);
-    setColor(THEME90.loMid);
-    fillRect(x + 1, y + h - 2, w - 2, 1); fillRect(x + w - 2, y + 1, 1, h - 2);
+  /* 对照 draw_button2.gml:16/18/39 —— 分支是 `theme != 3` 对 `theme == 3`：
+       非 Fluent（0/1/2）→ spr_button 三片式位图，靠 12*theme 的帧偏移
+                           区分「经典 / 复古 / 暗黑」三套浮雕
+       Fluent（3）      → 手绘圆角
+     之前这里写的是 `S.theme === 1`，只有复古走 90s 浮雕，
+     【经典和暗黑】都掉进了 Fluent 手绘圆角分支 —— 按钮风格与主题不符。
+     而且 spr_button 当时没打进图集，所以只能用代码近似复刻复古的浮雕。 */
+  const isSprite = S.theme !== 3;
+  if (isSprite) {
+    /* 帧布局（draw_button2.gml:19-21 / 40 / 46-50）：
+         左片 = m*3 + 12*theme，中片 = 1 + m*3 + 12*theme（横向拉伸 w/3），
+         右片 = 2 + m*3 + 12*theme；禁用态用 9/10/11 + 6*theme。
+       其中 m：0 普通 / 1 悬停 / 2 按下。 */
+    const m = locked ? 0 : (pressed ? 2 : (hover ? 1 : 0));
+    const base = 12 * S.theme;
+    if (locked) {
+      // 禁用：draw_sprite(spr_button, 9/10/11 + 6*theme)
+      const lb = 6 * S.theme;
+      drawSprite('spr_button', 10 + lb, x, y, w / 3, 1);
+      drawSprite('spr_button', 9 + lb, x, y);
+      drawSprite('spr_button', 11 + lb, x + w - 3, y);
+    } else {
+      drawSprite('spr_button', 1 + m * 3 + base, x, y, w / 3, 1);
+      drawSprite('spr_button', m * 3 + base, x, y);
+      drawSprite('spr_button', 2 + m * 3 + base, x + w - 3, y);
+    }
   } else {
     setColor(locked ? (C.dark ? '#2a2a2a' : '#f0f0f0') : (pressed ? C.controlBgPress : (hover ? C.controlBgHover : C.controlBg)));
     roundRect(x, y, x + w, y + h, 4, true);
     setColor(C.controlBorderDim);
     roundRect(x + 0.5, y + 0.5, x + w - 0.5, y + h - 0.5, 4, false);
   }
-  // 文字：90s 主题禁用态用 #808080（对照 draw_button2.gml:22 的 draw_set_color(10526880)）
-  setColor(locked ? (is90 ? THEME90.textLock : C.textDim) : C.text);
+  /* 文字色：对照 draw_button2.gml:22 与 111-122。
+     非 Fluent 主题下按钮底色来自位图（经典浅灰 / 复古米灰 / 暗黑深灰），
+     所以文字必须跟着走：暗黑用白字，其余用黑字。
+     禁用态统一用 #808080（GML: draw_set_color(10526880) = RGB(160,160,160) 偏暗的灰）。 */
+  setColor(locked ? '#808080' : (isSprite ? (S.theme === 2 ? '#ffffff' : '#000000') : C.text));
   setFont(FONT.main());
   const tw = textWidth(label);
   // 按下时文字右移 1px，模拟浮雕凹陷
-  const off = (is90 && pressed) ? 1 : 0;
+  const off = (isSprite && pressed) ? 1 : 0;
   text(x + (w - tw) / 2 + off, y + (h - 12) / 2 + off, label);
   return hover && G.mbr[0] && !locked;
 }
@@ -194,24 +208,32 @@ function drawCheckbox(x, y, state, label, locked) {
   const w = 13 + textWidth(label) + 8;
   const hover = !locked && mouseRectangle(x, y, w, 13);
   const c = G.ctx;
-  const is90 = S.theme === 1;
-  if (is90) {
+  /* 对照 draw_checkbox.gml:21/54 —— 分支条件是 `theme != 3` 对 `theme == 3`：
+       非 Fluent（经典 0 / 复古 1 / 暗黑 2）→ spr_checkbox 精灵（方框/打勾位图）
+       Fluent（3）                          → 手绘圆角复选框
+     之前这里写的是 `S.theme === 1`，只把「复古」当成 90s 方框，
+     于是【暗黑主题】掉进了 Fluent 分支 —— 暗黑下勾选框长成 Fluent 的圆角样式，
+     这正是用户说的「不同主题风格混用」。 */
+  const isSprite = S.theme !== 3;
+  if (isSprite) {
     // 对照 draw_checkbox.gml:31：theme 2/1 走「方框」分支（spr_checkbox 的方格样式），
     // 而不是 Fluent 的圆角复选框。白底 + 右下暗边 + 左上亮边，勾选后画黑勾。
-    setColor(locked ? '#c8c4bc' : '#ffffff');
+    // 暗黑主题（2）的底色要用深色版本，否则白底在深色面板上非常刺眼。
+    const darkBox = (S.theme === 2);
+    setColor(locked ? (darkBox ? '#3a3a3a' : '#c8c4bc') : (darkBox ? '#1e1e1e' : '#ffffff'));
     fillRect(x, y, 12, 12);
     setColor(THEME90.lo);
     fillRect(x, y + 11, 12, 1); fillRect(x + 11, y, 1, 12);
     setColor(THEME90.hi);
     fillRect(x, y, 12, 1); fillRect(x, y, 1, 12);
     if (state) {
-      c.strokeStyle = locked ? '#808080' : '#000000';
+      c.strokeStyle = locked ? '#808080' : (darkBox ? '#ffffff' : '#000000');
       c.lineWidth = 1.6;
       c.beginPath();
       c.moveTo(x + 2.5, y + 6); c.lineTo(x + 5, y + 9); c.lineTo(x + 10, y + 3.2);
       c.stroke();
     }
-    setColor(locked ? THEME90.textLock : '#000000');
+    setColor(locked ? THEME90.textLock : (darkBox ? '#ffffff' : '#000000'));
   } else {
     // Fluent 普通复选框，严格照 draw_checkbox.gml:142-182 的顺序：
     //   ① 填充：勾选 → accent[5 + 2*(m==1) + 3*(m==2)]
@@ -258,21 +280,25 @@ function drawRadiobox(x, y, state, label, locked) {
   const w = 13 + textWidth(label) + 8;
   const hover = !locked && mouseRectangle(x, y, w, 13);
   const c = G.ctx;
-  const is90 = S.theme === 1;
-  if (is90) {
+  /* 同样是 `theme != 3` 对 `theme == 3`（对照 draw_radiobox.gml:17）：
+     经典/复古/暗黑走位图方框分支，只有 Fluent 手绘。
+     之前写成 theme === 1，暗黑主题的单选框因此落进了 Fluent 分支。 */
+  const isSprite = S.theme !== 3;
+  if (isSprite) {
     // 对照 draw_radiobox.gml:17：theme 2/1 用 spr_radiobox 的方形/点阵样式。
     // 90s 主题下是「圆圈 + 内点」，边框同样是亮左上 / 暗右下。
-    setColor('#ffffff');
+    const darkBox = (S.theme === 2);
+    setColor(darkBox ? '#1e1e1e' : '#ffffff');
     c.beginPath(); c.arc(x + 6, y + 6, 6, 0, Math.PI * 2); c.fill();
     c.strokeStyle = THEME90.lo; c.lineWidth = 1;
     c.beginPath(); c.arc(x + 6.5, y + 6.5, 5.5, 0, Math.PI * 2); c.stroke();
     c.strokeStyle = THEME90.hi;
     c.beginPath(); c.arc(x + 5.5, y + 5.5, 5.5, 0, Math.PI * 2); c.stroke();
     if (state) {
-      setColor('#000000');
+      setColor(darkBox ? '#ffffff' : '#000000');
       c.beginPath(); c.arc(x + 6, y + 6, 2.5, 0, Math.PI * 2); c.fill();
     }
-    setColor(locked ? THEME90.textLock : '#000000');
+    setColor(locked ? THEME90.textLock : (darkBox ? '#ffffff' : '#000000'));
   } else {
     setColor(C.controlBg);
     c.beginPath(); c.arc(x + 6, y + 6, 6, 0, Math.PI * 2); c.fill();
@@ -291,6 +317,28 @@ function drawRadiobox(x, y, state, label, locked) {
 }
 function drawSwitch(x, y, state, label) {
   const c = G.ctx;
+  /* 对照 draw_checkbox.gml:24-25/44-45 —— is_switch 的帧规则：
+       非 Fluent：spr_switch，帧 = m + 8*fdark（关）/ m + 3 再叠 accent 色（开）
+       Fluent   ：手绘圆角开关
+     之前不分主题一律手绘，于是经典/复古/暗黑主题的开关是 Fluent 的胶囊造型，
+     和旁边成对的复选框（方框）风格打架 —— 这就是主题混用。 */
+  if (S.theme !== 3) {
+    const hover = mouseRectangle(x, y, label ? 32 + textWidth(label) : 26, 13);
+    const m = hover ? (G.mb[0] ? 1 : 1) : 0;
+    const darkOff = S.fdark ? 8 : 0;
+    if (!state) {
+      drawSprite('spr_switch', m + darkOff, x, y);
+    } else {
+      // 开启态：先画基础帧 m+3，再叠一层 accent 上色
+      drawSprite('spr_switch', m + 3, x, y);
+      drawSprite('spr_switch', m + 3, x, y, 1, 1,
+        T.accent[5 + 2 * (m === 1) + 3 * (m === 2)]);
+    }
+    setColor(S.theme === 2 ? '#ffffff' : '#000000');
+    setFont(FONT.main());
+    if (label) text(x + 32, y - 1, label);
+    return hover && G.mbr[0];
+  }
   setColor(state ? C.accent : (C.dark ? '#2a2a2a' : '#e9e9e9'));
   roundRect(x, y, x + 26, y + 13, 6.5, true);
   setColor(C.dark ? '#888888' : '#555555');
@@ -912,23 +960,61 @@ function drawMenu() {
     if (dy + mi.h > S.rh) dy = Math.max(0, S.rh - mi.h);
     pos[m].x = dx; pos[m].y = dy;
 
-    // 阴影 + 背景
+    /* 阴影 + 背景。
+       对照 menu_draw.gml:26-43，菜单的「形状」是分主题的：
+         · theme != 3（经典/复古/暗黑）：draw_rectangle —— 直角矩形，无阴影精灵
+         · theme == 3（Fluent）        ：draw_roundrect  —— 圆角 + spr_shadowext 外阴影
+       之前不分主题一律用圆角 6 + canvas 阴影，于是经典/复古/暗黑三个主题的菜单
+       都长得像 Fluent 的圆角卡片，和主题整体风格不符。 */
+    const isFluent = (S.theme === 3);
+    const rad = isFluent ? 6 : 0;
+    if (isFluent) {
+      c.save();
+      c.shadowColor = 'rgba(0,0,0,0.25)';
+      c.shadowBlur = 14; c.shadowOffsetY = 3;
+      setColor(C.menuBg);
+      roundRect(dx, dy, dx + mi.w, dy + mi.h, rad, true);
+      c.restore();
+    } else {
+      setColor(C.menuBg);
+      fillRect(dx, dy, dx + mi.w, dy + mi.h);
+    }
+    /* 外框：对照 menu_draw.gml:50-54 —— 颜色是 draw_theme_color()（强调色）0.25 alpha，
+       且同样分直角/圆角。这里用强调色低透明度还原。 */
     c.save();
-    c.shadowColor = 'rgba(0,0,0,0.25)';
-    c.shadowBlur = 14; c.shadowOffsetY = 3;
-    setColor(C.menuBg);
-    roundRect(dx, dy, dx + mi.w, dy + mi.h, 6, true);
+    c.globalAlpha = c.globalAlpha * 0.25;
+    setColor(T.accent[3]);
+    roundRect(dx + 0.5, dy + 0.5, dx + mi.w - 0.5, dy + mi.h - 0.5, rad, false);
     c.restore();
-    setColor(C.controlBorder);
-    roundRect(dx + 0.5, dy + 0.5, dx + mi.w - 0.5, dy + mi.h - 0.5, 6, false);
+    /* 非 Fluent 的这一条竖线是原版菜单的标志性细节：
+       对照 menu_draw.gml:44-49 —— 图标区与文字区之间画两条 1px 竖线
+       （强调色 0.25 alpha + 白色），Fluent 没有。 */
+    if (!isFluent) {
+      c.save();
+      c.globalAlpha = c.globalAlpha * 0.25;
+      setColor(T.accent[3]);
+      fillRect(dx + 29, dy + 3, dx + 29 + 1, dy + mi.h - 3);
+      c.restore();
+      setColor('#ffffff');
+      fillRect(dx + 30, dy + 3, dx + 30 + 1, dy + mi.h - 3);
+    }
+
 
     setFont(FONT.main());
     let iy = 8;
     for (let i = 0; i < mi.items.length; i++) {
       const it = mi.items[i];
       if (it.label === '-') {
-        setColor(C.separator);
+        /* 对照 menu_draw.gml:57-64 —— 分隔线是两条 1px 线：
+           上面一条是强调色 @0.25，下面一条是白色，形成一道浅刻痕。
+           之前只画了一条 C.separator，看起来像普通边框而不是分隔刻痕。 */
+        c.save();
+        c.globalAlpha = c.globalAlpha * 0.25;
+        setColor(T.accent[3]);
         line(dx + 32, dy + iy - 2, dx + mi.w - 3, dy + iy - 2);
+        c.restore();
+        setColor('#ffffff');
+        line(dx + 32, dy + iy - 1, dx + mi.w - 3, dy + iy - 1);
         iy += 6;
         continue;
       }
@@ -956,9 +1042,11 @@ function drawMenu() {
         // 之前一律用 C.menuHover，导致经典主题下没有那块标志性的蓝底白字，
         // 看起来就是「经典和 Fluent 的菜单配色搞反了」。
         if (S.theme !== 3) {
+          // 非 Fluent：直角实心块（menu_draw.gml:93 draw_rectangle）
           setColor(C.menuSel);
           fillRect(dx + 3, dy + iy - 5, mi.w - 5, 22);
         } else {
+          // Fluent：圆角块（menu_draw.gml:98 draw_roundrect）
           setColor(C.menuHover);
           roundRect(dx + 3, dy + iy - 5, dx + mi.w - 2, dy + iy - 5 + 22, 4, true);
         }
@@ -976,8 +1064,10 @@ function drawMenu() {
         setFont(FONT.main());
       }
       if (it.image > -1) {
-        // 对照 menu_draw.gml:117-130：非 Fluent 用 spr_icons，Fluent 用 spr_icons_f/d + spr_icons_col
-        drawToolIcon(it.image, dx + 4, dy + iy - 5, false);
+        /* 图标位置对照 menu_draw.gml:118/123 —— 原版是 dx + 2, dy + iy - 6。
+           之前写成 dx + 4, dy + iy - 5，看起来只是 2px 的差别，
+           但菜单图标是 25x25 的整块，偏 2px 就会和左侧那条分隔竖线压在一起。 */
+        drawToolIcon(it.image, dx + 2, dy + iy - 6, false);
       }
       if (it.sub > 0) {
         // 对照 menu_draw：子菜单箭头就是 spr_icons 的 SUB_MENU 帧

@@ -574,6 +574,73 @@ theme 3 用 `spr_layericons_f` 双层（基帧 + accent 上色层）。
 - **schematic / 结构导出**：已在 Minecraft 中实际加载测试，音符方块与红石布线均可正常播放。
 - **数据包导出**：已在 Minecraft 中实际加载测试，`execute … run playsound` 指令链可正常发声。
 
+## 主题：图标与菜单风格为什么会混用
+
+原版有四套主题（经典 0 / 复古 1 / 暗黑 2 / Fluent 3），而**几乎每个 sprite 都有两套**：
+带 `_f` 后缀的是 Fluent 的线稿（需要再叠一层 `_col` 用强调色上色），
+不带的才是经典/复古/暗黑用的自带配色实心图。
+
+分支条件在源码里几乎统一是 **`theme != 3` 对 `theme == 3`**，不是 `theme == 1`。
+把条件写成 `theme === 1` 会让**暗黑主题**掉进 Fluent 分支，表现就是
+"暗黑下按钮/勾选框/菜单长着 Fluent 的样子"。
+
+审计中查出并处的问题：
+
+| 位置 | 问题 | 修法 |
+|---|---|---|
+| `drawButton` | 只有复古走浮雕，经典/暗黑用 Fluent 圆角 | 改 `theme != 3`，并补入 `spr_button`（72 帧，`12*theme` 偏移） |
+| `drawCheckbox` / `drawRadiobox` | 同样只判 `theme === 1` | 改 `theme != 3`，暗黑用深色方框 |
+| `drawSwitch` | 不分主题一律手绘胶囊 | 非 Fluent 用 `spr_switch` |
+| 音量/立体声指示器 | 一律用 `_f` 版 | 补入 `spr_volume`/`spr_stereo`，非 Fluent 用它们 |
+| `drawMacroBar` | 没画底板；`hover ? 15 : 0` 三元两边相同；漏 alpha 与颜色 | 按 `draw_macroicon.gml` 重写 |
+| `drawMenu` | 不分主题一律圆角 + canvas 阴影；缺图标分隔竖线 | 非 Fluent 直角 + 双线刻痕，Fluent 圆角 |
+| MIDI 导入页签 | 选中态用 24 段、未选中态没画 sprite | 分离两种画法 |
+
+**根因是素材缺失**：`spr_volume`、`spr_stereo`、`spr_button` 当时根本没打进图集
+（`ATLAS_SETS` 里没有）。缺素材就只能退而用 `_f` 版，于是"图标混用"无法避免。
+补进 `assets.js` 的 `ATLAS_SETS` 后由 `tools/build-atlas.py` 重新生成图集即可。
+
+菜单那两条竖线值得单说：`menu_draw.gml:44-49` 在图标区与文字区之间画
+**两条** 1px 线（强调色 @0.25 + 白色），形成一道浅刻痕。少了它，
+非 Fluent 主题的菜单就看不出图标区和文字区的分界。
+
+## 长歌曲全选被截断
+
+**症状**：歌曲超过 1024 tick 时按 Ctrl+A，后面的部分全部消失。
+
+根因有两层，第二层才是真正致命的：
+
+1. 选区缓冲区 `SEL.exists` 等按 `sidx(x,y) = x * SEL_CAP + y` 寻址，
+   长度固定成 `1024 * SEL_CAP` —— 列容量就是 1024。超过就写到 TypedArray
+   之外，而 JS 的 TypedArray **对越界写入是静默丢弃的**，不报错。
+   现已改为 `selectionEnsureCols()` 按需翻倍扩容。
+
+2. `selectAll` 的音色匹配条件：
+   ```js
+   ((ins === instIndex || instIndex === -1) && !not) || (ins !== instIndex && not)
+   ```
+   无参调用时 `instIndex` 和 `not` 都是 `undefined`，**两个分支都算 false**，
+   于是一个方块都选不上。这才是任何长度下 Ctrl+A 都失效、
+   以及"导出片段得到空文件"的直接原因。现在把"未指定音色"归一化为匹配全部。
+
+第 2 条也解释了另一个看起来无关的现象：全选后 `SEL.code` 为空，
+导出片段写出的文件只有 20 字节，再导入自然什么也没有。
+
+## .nbp 片段导入报「Invalid typed array length」
+
+`GameMaker` 的 `buffer_write_string()` 写的是**一串字节加一个 0x00 终止符**，
+没有长度前缀；而 `.nbs` 里的字符串是「4 字节小端长度 + UTF-8」。
+两者格式不同，`readPattern` 却复用了 `.nbs` 的 `str()`。
+
+于是它把选区代码的第一个字符 `'0'`（0x30）连同后面的 `|0|` 当成 int32 长度：
+`0x7C307C30` = 2083552304，`new Uint8Array` 当场抛
+「Invalid typed array length: 2083552304」。
+
+现在 `ByteReader`/`ByteWriter` 各有两个方法：
+`str()` 用于 `.nbs`（长度前缀），`cstr()` 用于 `.nbp`（null 结尾）。
+修好后导入该文件得 345 个音符、1121 列，导出再导入的字节数与原始文件
+**完全一致（9172 字节）**。
+
 ## 单文件版是怎么做的
 
 根目录的 `index.html` 是 `src/` 的完整内联版本：

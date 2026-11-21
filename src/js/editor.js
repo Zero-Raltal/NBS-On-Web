@@ -2029,15 +2029,26 @@ function drawLayersPanel() {
     }
     setFont(FONT.main());
 
-    // 音量（基帧 + 等级叠加，对照 control_draw 的 spr_volume_f 用法）
+    // 音量（基帧 + 等级叠加）
     if (S.realvolume) {
       const hover = mouseRectangle(lx + 88, ly + 5, 16, 22) && !isDialogWindow(S.window);
       const vol = layer < S.endb2 ? (S.layervol[layer] || 100) : 100;
       const dy = hover ? -3 : 0;
       const iconColor = S.fdark ? '#ffffff' : '#000000';
-      drawSprite('spr_volume_f', S.fdark ? 1 : 0, lx + 91, ly + 11 + dy, 1, 1, iconColor);
-      drawSprite('spr_volume_f', clamp(floor(vol / 30), 0, 3) + 2, lx + 91, ly + 11 + dy,
-        1, 1, T.accent[6 - 2 * (S.fdark ? 0 : 1)]);
+      /* 对照 control_draw.gml:1341-1351 —— 图标分两套：
+           theme != 3        → spr_volume，单张实心图标，帧 = a/30，alpha 0.7
+           theme == 3 浅色   → spr_volume_f 帧 !fdark，再叠一帧 a/30+2 上 accent 色
+           theme == 3 深色   → 同上但基帧取 !fdark = 0
+         之前不分主题一律画 _f 两层，所以经典/复古/暗黑主题的音量指示器
+         是 Fluent 的线稿样式（而且还多叠了一层 accent 色），和主题不符。 */
+      if (S.theme !== 3) {
+        drawSprite('spr_volume', clamp(floor(vol / 30), 0, 3), lx + 91, ly + 11 + dy,
+          1, 1, iconColor, 0.7);
+      } else {
+        drawSprite('spr_volume_f', S.fdark ? 1 : 0, lx + 91, ly + 11 + dy, 1, 1, iconColor);
+        drawSprite('spr_volume_f', clamp(floor(vol / 30), 0, 3) + 2, lx + 91, ly + 11 + dy,
+          1, 1, T.accent[6 - 2 * (S.fdark ? 0 : 1)]);
+      }
       popupSet(lx + 90, ly + 5, 14, 18, '本层的音量: ' + vol + '%\n（拖拽来修改，按住 Shift 微调）');
       if (hover) { G.cursor = 'ns-resize'; }
       if (hover && G.mbp[0]) { S.window = W_DRAGVOL; S.dragvolb = layer; S.dragvol = vol; }
@@ -2051,15 +2062,23 @@ function drawLayersPanel() {
         S.changed = 1;
       }
     }
-    // 立体声（对照 spr_stereo_f 的用法）
+    // 立体声（主题分派同音量图标，对照 control_draw.gml:1376-1377）
     if (!S.realstereo) {
       const hover = mouseRectangle(lx + 108, ly + 5, 16, 22) && !isDialogWindow(S.window);
       const st = layer < S.endb2 ? (S.layerstereo[layer] || 100) : 100;
       const dy = hover ? -3 : 0;
       const iconColor = S.fdark ? '#ffffff' : '#000000';
-      drawSprite('spr_stereo_f', S.fdark ? 1 : 0, lx + 110, ly + 11 + dy, 1, 1, iconColor);
-      drawSprite('spr_stereo_f', clamp(floor(st / 50) + 2, 2, 6), lx + 110, ly + 11 + dy,
-        1, 1, T.accent[6 - 2 * (S.fdark ? 0 : 1)]);
+      /* 对照 control_draw.gml:1376-1377：
+           theme != 3 → spr_stereo（单张实心图标，帧 = a/50，alpha 0.7）
+           theme == 3 → spr_stereo_f 两层（基帧 !fdark + 等级帧 a/50+2 上 accent） */
+      if (S.theme !== 3) {
+        drawSprite('spr_stereo', clamp(floor(st / 50), 0, 4), lx + 110, ly + 11 + dy,
+          1, 1, iconColor, 0.7);
+      } else {
+        drawSprite('spr_stereo_f', S.fdark ? 1 : 0, lx + 110, ly + 11 + dy, 1, 1, iconColor);
+        drawSprite('spr_stereo_f', clamp(floor(st / 50) + 2, 2, 6), lx + 110, ly + 11 + dy,
+          1, 1, T.accent[6 - 2 * (S.fdark ? 0 : 1)]);
+      }
       popupSet(lx + 108, ly + 5, 14, 18, '立体声声道: ' +
         (st > 100 ? 'R ' + (st - 100) : st < 100 ? 'L ' + (100 - st) : '中央') + '\n（拖拽来修改，按住 Shift 微调）');
       if (hover) G.cursor = 'ns-resize';
@@ -2152,6 +2171,14 @@ function layerIcon(n, x, y, pressed, tip) {
 }
 
 /* ---------------------------------------------------------------- 宏工具条 */
+/* 对照 draw_macroicon.gml 逐项移植。之前这里有三处偏离源码：
+   1. 完全没画底板 spr_frame4 —— 原版每个宏按钮都有一个方框，
+      少掉底板后图标直接浮在面板底色上，和别的按钮视觉不统一；
+   2. hover 帧写成 `i + (hover ? 15 : 0) > 14 ? i : i` ——
+      三元两边都是 i，判断恒等于 i，所以 hover 从来没生效过。
+      而且源码里【根本没有 hover 变帧】，hover 只影响底板的帧（a）与图标偏移；
+   3. 图标固定 0.7 alpha、颜色按主题变（theme 2 或 fdark 用白色，否则黑色）
+      这两点都漏了，所以暗黑主题下图标是黑的黑的，几乎看不见。 */
 function drawMacroBar() {
   // 紧贴图层面板底部（layers 行从 y=85 开始，每行 32）
   const bx = 4, by = 85 + S.totalrows * 32 + 2;
@@ -2164,18 +2191,36 @@ function drawMacroBar() {
   () => macroChorus(), () => macroVelocityLFO(), () => macroFade(true), () => macroFade(false),
   () => macroReplaceKey(), () => S.window = W_SETVELOCITY, () => S.window = W_SETPANNING,
   () => S.window = W_SETPITCH, () => macroReset()];
-  for (let i = 0; i < 8; i++) {
-    const x = bx + 6 + i * 25, y = by + 6;
+
+  const drawOne = (i, x, y) => {
     const hover = mouseRectangle(x, y, 16, 16);
     if (hover) { G.cursor = 'pointer'; popupSet(x, y, 16, 16, icons[i]); }
-    drawSprite('spr_macroicons', i + (hover ? 15 : 0) > 14 ? i : i, x, y);
+    /* 对照 draw_macroicon.gml:14：a = 鼠标悬停；再叠一次「按下/刚松开」变成 2。 */
+    let a = hover ? 1 : 0;
+    a += ((G.mb[0] || G.mbr[0]) && a) ? 1 : 0;
+    /* 底板：帧 = a + 3*theme + 3*(fdark && theme==3)。
+       Fluent 深色主题额外 +3（那是它自己的深色底板帧组）。 */
+    const pressed = 0;    // 宏按钮没有"保持按下"的视觉，源码里 pressed 只用于 7/8 类按钮
+    const frameBase = pressed ? 2 : a;
+    const darkExtra = (S.theme === 3 && S.fdark) ? 3 : 0;
+    drawSprite('spr_frame4', frameBase + 3 * S.theme + darkExtra, x, y);
+    /* 图标：帧恒为 i（无 hover 变帧），按下/悬停时右下偏移 1px。
+       颜色：theme 2 或 (fdark && theme 3) 用白色，其余黑色 —— 这就是
+       之前暗黑主题下宏图标几乎看不见的原因。 */
+    const shift = (a === 2) ? 1 : 0;
+    const col = (S.theme === 2 || (S.theme === 3 && S.fdark)) ? '#ffffff' : '#000000';
+    drawSprite('spr_macroicons', i, x + shift, y + shift, 1, 1, col, 0.7);
+    return hover;
+  };
+
+  for (let i = 0; i < 8; i++) {
+    const x = bx + 6 + i * 25, y = by + 6;
+    const hover = drawOne(i, x, y);
     if (hover && G.mbr[0]) { S.playing = 0; actions[i](); }
   }
   for (let i = 8; i < 15; i++) {
     const x = bx + 6 + (i - 8) * 25, y = by + 26;
-    const hover = mouseRectangle(x, y, 16, 16);
-    if (hover) { G.cursor = 'pointer'; popupSet(x, y, 16, 16, icons[i]); }
-    drawSprite('spr_macroicons', i, x, y);
+    const hover = drawOne(i, x, y);
     if (hover && G.mbr[0]) { S.playing = 0; actions[i](); }
   }
 }

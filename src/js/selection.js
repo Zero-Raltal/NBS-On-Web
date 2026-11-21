@@ -5,22 +5,49 @@
    ========================================================================= */
 'use strict';
 
-const SEL_CAP = 512;
+const SEL_CAP = 512;      // 每列的层容量（竖直方向）
+const SEL_COLS0 = 1024;   // 初始列容量（水平方向），可按需翻倍扩容
 
+/* 【选区缓冲区的列容量必须能增长】
+   sidx(x, y) = x * SEL_CAP + y —— 也就是说列的容量完全由数组长度除以 SEL_CAP 决定。
+   原来这里固定成 1024 列，于是任何超过 1024 列的选区/拷贝，下标一越过
+   1024 * SEL_CAP 就写到了 TypedArray 之外：JS 的 TypedArray 对越界写入
+   是【静默丢弃】的，不报错也不扩容。
+   表现出来就是用户报的：「歌曲长度超过 1024 tick，按一下 Ctrl+A，
+   超过 1024 tick 后面的部分就都被截断」—— 后面的方块根本没被搬进选区，
+   而选区的「抬起」过程已经把源方块删掉了，所以它们直接消失了。
+   现在改成按需扩容：selectionEnsureCols() 在写入前把容量翻倍到够用为止。 */
 const SEL = {
   x: 0, y: 0, l: 0, h: 0,
   code: '',
-  exists: new Uint8Array(1024 * SEL_CAP),
-  ins: new Uint16Array(1024 * SEL_CAP),
-  key: new Uint8Array(1024 * SEL_CAP),
-  vel: new Uint8Array(1024 * SEL_CAP),
-  pan: new Uint8Array(1024 * SEL_CAP),
-  pit: new Int16Array(1024 * SEL_CAP),
-  played: new Float64Array(1024 * SEL_CAP),
+  exists: new Uint8Array(SEL_COLS0 * SEL_CAP),
+  ins: new Uint16Array(SEL_COLS0 * SEL_CAP),
+  key: new Uint8Array(SEL_COLS0 * SEL_CAP),
+  vel: new Uint8Array(SEL_COLS0 * SEL_CAP),
+  pan: new Uint8Array(SEL_COLS0 * SEL_CAP),
+  pit: new Int16Array(SEL_COLS0 * SEL_CAP),
+  played: new Float64Array(SEL_COLS0 * SEL_CAP),
   colfirst: new Int32Array(4096).fill(-1),
   collast: new Int32Array(4096).fill(-1),
-  capW: 1024,
+  capW: SEL_COLS0,          // 当前列容量（= 数组长度 / SEL_CAP）
 };
+
+/* 确保选区缓冲区至少能容纳 cols 列。只在扩容时复制，平时零开销。 */
+function selectionEnsureCols(cols) {
+  if (cols <= SEL.capW) return;
+  let cap = SEL.capW;
+  while (cap < cols) cap *= 2;
+  const n = cap * SEL_CAP;
+  const grow = (Ctor, old) => { const a = new Ctor(n); a.set(old); return a; };
+  SEL.exists = grow(Uint8Array, SEL.exists);
+  SEL.ins = grow(Uint16Array, SEL.ins);
+  SEL.key = grow(Uint8Array, SEL.key);
+  SEL.vel = grow(Uint8Array, SEL.vel);
+  SEL.pan = grow(Uint8Array, SEL.pan);
+  SEL.pit = grow(Int16Array, SEL.pit);
+  SEL.played = grow(Float64Array, SEL.played);
+  SEL.capW = cap;
+}
 
 /* GML 的数组下标会自动向下取整（array[1.7] 就是 array[1]），JS 的 TypedArray
    则会把小数下标悄悄忽略掉——写入变成空操作、读取返回 undefined，而且不报错。
@@ -37,6 +64,10 @@ function selectionReset() {
   S.selected = 0;
 }
 
+/* 扩容。除了 colfirst/collast 这两张"每列有没有内容"的索引，
+   还必须一起扩【主缓冲区】（exists/ins/key/vel/pan/pit/played）——
+   之前只扩了前者，主缓冲区仍是固定的 1024 列，
+   于是超过 1024 列的选区在写入时越界、被 TypedArray 静默丢弃（见上方注释）。 */
 function selectionExtendLength(n) {
   if (n === undefined) n = S.enda;
   if (n >= SEL.colfirst.length) {
@@ -46,6 +77,7 @@ function selectionExtendLength(n) {
     nf.set(SEL.colfirst); nl.set(SEL.collast);
     SEL.colfirst = nf; SEL.collast = nl;
   }
+  selectionEnsureCols(n + 1);
 }
 function selectionExtendHeight(n) { /* 固定行容量，无需扩容 */ }
 
@@ -513,6 +545,11 @@ function selectionLoad(x, y, code, undo) {
   if (!blocks.length) return 0;
   let maxA = 0, maxB = 0;
   SEL.x = floor(x); SEL.y = floor(y);
+  /* 先按片段的最大列号扩容，再往里写。
+     blocks 是另一首歌/剪贴板的内容，列号可能远超当前歌曲长度 ——
+     不先扩容就会越界写入被静默丢弃（长歌曲粘贴/全选时后半段丢失）。 */
+  for (const b of blocks) { if (b.x > maxA) maxA = b.x; if (b.y > maxB) maxB = b.y; }
+  selectionExtendLength(maxA + 2);
   for (const b of blocks) {
     const i = sidx(b.x, b.y);
     SEL.exists[i] = 1; SEL.ins[i] = b.ins; SEL.key[i] = b.key;
@@ -560,12 +597,23 @@ function selectAll(instIndex, not) {
   const enda0 = S.enda, endb0 = S.endb;
   const before = { sel: snapshotSelection(), reg: snapshotRegion(0, 0, S.arraylength, S.arrayheight) };
   selectionExtendLength(enda0 + 2);
+  /* 【无参调用 = 全选所有音色】
+     对照 GML 的 select_all(inst_index, not)：它对所有列/行都走 `a = 1`，
+     也就是"不看音色"。这里原来的条件写成了
+         ((ins === instIndex || instIndex === -1) && !not) || (ins !== instIndex && not)
+     无参调用时 instIndex / not 都是 undefined，两个分支都算成 false，
+     于是【一个方块都选不上】—— 表现出来就是按 Ctrl+A 毫无反应、
+     选区代码为空，导出片段得到空文件。这就是「超过 1024 tick 全选截断」
+     和「导出片段为空」共同的直接原因。
+     现在把"未指定音色"统一归一化成 instIndex === -1（即匹配全部）。 */
+  const wantAll = (instIndex === undefined || instIndex === null || instIndex < 0) && !not;
+  const matchIns = (ins) => (wantAll ? true : (!not ? ins === instIndex : ins !== instIndex));
   for (let a = 0; a <= enda0; a++) {
     if (colamount[a] > 0) {
       for (let b = colfirst[a]; b <= collast[a]; b++) {
         if (gExists(a, b)) {
           const ins = gIns(a, b);
-          if (((ins === instIndex || instIndex === -1) && !not) || (ins !== instIndex && not)) {
+          if (matchIns(ins)) {
             const i = sidx(a, b);
             SEL.exists[i] = 1; SEL.ins[i] = ins; SEL.key[i] = gKey(a, b);
             SEL.vel[i] = gVel(a, b); SEL.pan[i] = gPan(a, b); SEL.pit[i] = gPit(a, b);

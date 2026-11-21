@@ -11,10 +11,27 @@ class ByteReader {
   sbyte() { if (this.p >= this.buf.byteLength) throw new Error('EOF'); return this.d.getInt8(this.p++); }
   short() { const v = this.d.getInt16(this.p, true); this.p += 2; return v; }
   int() { const v = this.d.getInt32(this.p, true); this.p += 4; return v; }
+  /* .nbs 里的字符串是「4 字节小端长度 + UTF-8 字节」。 */
   str() {
     const len = this.int();
+    if (len < 0 || this.p + len > this.buf.byteLength) throw new Error('字符串长度越界: ' + len);
     const bytes = new Uint8Array(this.buf, this.p, len);
     this.p += len;
+    return new TextDecoder('utf-8').decode(bytes);
+  }
+  /* 【.nbp 片段里的字符串是 null 结尾，没有长度前缀】
+     GameMaker 的 buffer_write_string() 写的是一串字节加一个 0x00 终止符，
+     pattern_export.gml 用的正是它（`buffer_write_string(try_decompress_selection(...))`）。
+     之前 readPattern 复用了 .nbs 的 str()（4 字节长度前缀），于是把选区代码的
+     第一个字符 '0'（0x30）连同后面的 `|0|` 当成 int32 长度：
+     0x7C307C30 = 2083552304 → new Uint8Array 直接抛
+     「Invalid typed array length: 2083552304」。
+     这就是「导入片段失败」的真正原因。 */
+  cstr() {
+    let end = this.p;
+    while (end < this.buf.byteLength && this.d.getUint8(end) !== 0) end++;
+    const bytes = new Uint8Array(this.buf, this.p, end - this.p);
+    this.p = (end < this.buf.byteLength) ? end + 1 : end;   // 跳过终止符
     return new TextDecoder('utf-8').decode(bytes);
   }
   skip(n) { this.p += n; }
@@ -27,10 +44,17 @@ class ByteWriter {
   int(v) {
     this.a.push(v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff);
   }
+  /* .nbs 风格：4 字节长度 + UTF-8 */
   str(s) {
     const enc = new TextEncoder().encode(s == null ? '' : String(s));
     this.int(enc.length);
     for (const b of enc) this.a.push(b);
+  }
+  /* .nbp 风格：UTF-8 + null 终止符（对应 buffer_write_string） */
+  cstr(s) {
+    const enc = new TextEncoder().encode(s == null ? '' : String(s));
+    for (const b of enc) this.a.push(b);
+    this.a.push(0);
   }
   bytes() { return new Uint8Array(this.a); }
 }
@@ -268,7 +292,8 @@ function buildPattern() {
   w.short(S.enda);
   w.short(S.endb);
   w.short(SEL.l);
-  w.str(tryDecompressSelection(SEL.code));
+  // 注意用 cstr（null 结尾），不是 str（长度前缀）——见 ByteReader.cstr 的注释
+  w.cstr(tryDecompressSelection(SEL.code));
   for (let a = 0; a < SEL.l; a++) {
     // 对照源码：直接写 selection_colfirst/collast（-1 也要照写，读取端靠它判断空列）
     w.byte(SEL.colfirst[a] < 0 ? -1 : SEL.colfirst[a]);
@@ -291,7 +316,8 @@ function readPattern(buf) {
   const enda = r.short();
   const endb = r.short();
   const l = r.short();
-  const code = r.str();
+  // .nbp 的字符串是 null 结尾（buffer_write_string），不是 .nbs 的 4 字节长度前缀
+  const code = r.cstr();
   return { ver, enda, endb, l, code };
 }
 

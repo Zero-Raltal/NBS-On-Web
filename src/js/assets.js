@@ -15,6 +15,22 @@ const ATLAS_SETS = [
   'spr_scrollbar_v_bar_down', 'spr_scrollbar_v_bar_handle', 'spr_scrollbar_h_bar_left',
   'spr_scrollbar_h_bar_right', 'spr_scrollbar_h_bar_handle', 'spr_button_arrow',
   'spr_checkbox', 'spr_radiobox', 'spr_switch', 'spr_volume_f', 'spr_stereo_f',
+  /* 非 Fluent 主题的音量/立体声指示器。
+     对照 control_draw.gml:1341-1342 / 1376-1377：
+         if (theme != 3) draw_sprite_ext(spr_volume, a / 30, ...)
+         else            draw_sprite_ext(spr_volume_f, !fdark, ...)
+     也就是说 theme 0/1/2 用的是【不带 _f】的 spr_volume / spr_stereo ——
+     那是自带配色的实心图标，而 _f 版是 Fluent 的线稿（需要叠加 accent 上色）。
+     之前只打了 _f 两套，非 Fluent 主题只能退而用 _f 版，
+     于是经典/复古/暗黑的图层抽屉里出现了 Fluent 样式的音量图标 —— 这就是
+     用户说的「不同主题图标混用」。这里把两套都补进图集。 */
+  'spr_volume', 'spr_stereo',
+  /* 按钮底板。对照 draw_button2.gml:18-21/39-50 —— 所有非 Fluent 主题都用
+       draw_sprite(spr_button, m * 3 + 12 * theme + ...)
+     也就是靠 12*theme 的偏移区分「经典 / 复古 / 暗黑」三套按钮浮雕，
+     只有 theme 3 才手绘圆角。之前没打这套图，drawButton 只能不分主题地
+     手绘 Fluent 圆角按钮，于是经典/复古/暗黑的按钮全是 Fluent 的样子。 */
+  'spr_button',
   'spr_tabbuttons', 'spr_tabsel', 'spr_yesno_f', 'spr_logo', 'spr_bigicons_f',
   'spr_block_shape', 'spr_block_color_shape', 'spr_frame4',
   // 滚动条（原版 spr_scrollbar_* 全套）
