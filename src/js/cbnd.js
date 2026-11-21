@@ -743,36 +743,70 @@ function decodeTextSmart(arrayBuffer) {
   return text;
 }
 
+/* ---------------------------------------------------------------- 导入执行
+   把「拿到字节 → 解析 → 落地 → 提示」这段抽成函数，
+   菜单里的「从 CBND 导入…」和统一的打开入口 dispatchFile() 共用同一份逻辑。
+   早先这段是内联在 pickFile 回调里的，dispatchFile 想复用得整段重抄，
+   抄两份必然会漂移 —— 所以抽出来。 */
+
+/* 判断一段字节像不像 .cbnd 位流。
+   用于「用户把 .cbnd 改名成 .bin/.dat，或者反过来」的情况：
+   不只看后缀，也看一眼文件头。
+   结构上 CBND 是：8 位速度 + 16 位起始标志（必须为 0），
+   所以第 1、2 字节（起始标志的 16 位）都是 0，且总长至少 3 字节。
+   这个判据很弱，所以只在【后缀不认识】时才用，不能盖过后缀判断 ——
+   否则任何以两个 0 字节开头的文件都会被当 cbnd 解析。 */
+function looksLikeCbnd(arrayBuffer) {
+  try {
+    const b = new Uint8Array(arrayBuffer);
+    if (b.length < 4) return false;
+    // 起始标志 16 位为 0（小端顺序读到的是 b[1]、b[2]）
+    return b[1] === 0 && b[2] === 0;
+  } catch (e) { return false; }
+}
+
+/* 从 .cbnd 字节导入。name 仅用于提示。 */
+function importCbndBytes(arrayBuffer, name) {
+  try {
+    const result = parseCBND(arrayBuffer);
+    const n = applyCbndImport(result, name);
+    const oor = importRangeNote();
+    if (result.loop && result.loop.enabled) {
+      S.selected = 0;
+      setMsg('已从 .cbnd 导入 ' + n + ' 个音符（含循环标记，起点 '
+        + (result.loop.startTick + 1) + '）' + oor);
+    } else {
+      setMsg('已从 .cbnd 导入 ' + n + ' 个音符' + oor);
+    }
+    return n;
+  } catch (e) {
+    messageDialog('导入 .cbnd 失败：\n' + e.message, '错误');
+    return -1;
+  }
+}
+
+/* 从指令文本（playsound 列表）导入。参数是 ArrayBuffer，内部按需解码。 */
+function importCommandTextBytes(arrayBuffer, name) {
+  try {
+    const raw = decodeTextSmart(arrayBuffer);
+    const result = parseCommandText(raw, { tempo: CMDTEXT_DEFAULT_TEMPO });
+    const n = applyCbndImport(result, name);
+    setMsg('已从指令文本导入 ' + n + ' 个音符（' + result.stats.commandLines + ' 条 playsound，'
+      + result.stats.distinctTicks + ' 个刻，' + result.stats.instruments + ' 种乐器各自分到独立层）'
+      + '．速度按 20 t/s（无延迟循环命令方块的速度），可在左上角速度框调整');
+    return n;
+  } catch (e) {
+    messageDialog('导入指令文本失败：\n' + e.message, '错误');
+    return -1;
+  }
+}
+
 /* 供 dialogs.js 的文件菜单调用 */
 function importCbndDialog() {
-  pickFile('.cbnd', (ab, name) => {
-    try {
-      const result = parseCBND(ab);
-      const n = applyCbndImport(result, name);
-      const oor = importRangeNote();
-      if (result.loop && result.loop.enabled) {
-        S.selected = 0;
-        setMsg('已从 .cbnd 导入 ' + n + ' 个音符（含循环标记，起点 ' + (result.loop.startTick + 1) + '）' + oor);
-      } else {
-        setMsg('已从 .cbnd 导入 ' + n + ' 个音符' + oor);
-      }
-    } catch (e) {
-      messageDialog('导入 .cbnd 失败：\n' + e.message, '错误');
-    }
-  });
+  // accept 已不再生效（见 nbs.js 的 pickFile），这里保留参数只为可读性
+  pickFile('', (ab, name) => { importCbndBytes(ab, name); });
 }
 
 function importCommandTextDialog() {
-  pickFile('.txt,.log,.mcfunction,.cmds,text/plain', (ab, name) => {
-    try {
-      const raw = decodeTextSmart(ab);
-      const result = parseCommandText(raw, { tempo: CMDTEXT_DEFAULT_TEMPO });
-      const n = applyCbndImport(result, name);
-      setMsg('已从指令文本导入 ' + n + ' 个音符（' + result.stats.commandLines + ' 条 playsound，'
-        + result.stats.distinctTicks + ' 个刻，' + result.stats.instruments + ' 种乐器各自分到独立层）'
-        + '．速度按 20 t/s（无延迟循环命令方块的速度），可在左上角速度框调整');
-    } catch (e) {
-      messageDialog('导入指令文本失败：\n' + e.message, '错误');
-    }
-  });
+  pickFile('', (ab, name) => { importCommandTextBytes(ab, name); });
 }

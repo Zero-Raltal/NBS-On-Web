@@ -78,6 +78,11 @@ function touchMouseBlocked() {
 function toLogicalPoint(e) {
   const r = G.canvas.getBoundingClientRect();
   const sc = touchEffScale();
+  /* 与 core.js 的 toLogical 保持一致：同时维护屏幕坐标 sx/sy。
+     首选项的页面缩放拖动要按"手指在屏幕上真实移动的像素"计算，
+     用逻辑坐标会因为改了缩放而自反馈（详见 drawWindowScaleDrag 的注释）。 */
+  G.mouse.sx = e.clientX - r.left;
+  G.mouse.sy = e.clientY - r.top;
   return [(e.clientX - r.left) / sc, (e.clientY - r.top) / sc];
 }
 
@@ -110,6 +115,20 @@ function touchFireLongPress() {
   TOUCH.timer = null;
   if (!p || p.longFired || p.panned) return;
   if (p.moved) return;                 // 已经动了，说明是拖拽，不是长按
+  /* 【正在进行任何"按住拖动"时，长按一律不生效】
+     第二道保险（第一道在 touchPointerDown：按在滚动条上就不挂定时器）。
+     这里再兜一次底，因为长按定时器可能在拖动已经开始的瞬间刚好到点：
+     一旦放行，下面的 `G.mb[0] = false` 和 `SB.drag[*] = -1` 会把
+     正在进行的拖动当场掐断 —— 滚动条、速度滑块、选区拖动都会受影响。
+     判据只认"真的有拖动在跑"，静止按住不动时仍然是正常的长按 → 右键。 */
+  const dragging = (typeof SB !== 'undefined' && ((SB.drag && (SB.drag[0] !== -1 || SB.drag[1] !== -1)) ||
+    (SB.hold !== undefined && SB.hold >= 0))) ||
+    (typeof UI !== 'undefined' && UI.drag && UI.drag.id !== undefined && UI.drag.id !== -1) ||
+    (typeof UI !== 'undefined' && UI.dragLock !== undefined && UI.dragLock !== -1 && UI.dragLock !== null) ||
+    (typeof S !== 'undefined' && (S.select > 0 || S.window === W_DRAGSELECTION ||
+      S.window === W_DRAG || S.window === W_DRAGVOL || S.window === W_DRAGSTEREO ||
+      S.window === W_DRAGTEMPO || S.window === W_DRAGMARKER));
+  if (dragging) { p.longFired = true; return; }
   p.longFired = true;
 
   // 撤回左键（不给 mbr[0]）
@@ -178,8 +197,20 @@ function touchPointerDown(e) {
   G.mouse.x = x; G.mouse.y = y;
   G.mb[0] = true; G.mbp[0] = true;
 
+  /* 【按在滚动条/滑块上时不要启动长按计时器】
+     这是用户报"滚动条只能点不能拖"的根因之一：
+     touchPointerDown 无条件挂一个 450ms 的长按定时器，到点就执行
+     touchFireLongPress() —— 那个函数会 `G.mb[0] = false` 并且把
+     `S.window = 0; SB.drag[0] = SB.drag[1] = -1`（见 :121 / :130-132）。
+     于是：手指按住滚动条开始拖动，只要按住超过 450ms，
+     拖动状态就被长按逻辑当场掐断 —— 表现就是"能点一下，但拖着拖着就断了"。
+     滚轮滑块、拖动条这类控件本来就靠"按住不放"工作，和长按手势天然冲突。
+     判据用按下点是否落在滚动条/拖动条的矩形内（这些矩形由绘制时记在
+     UI.sbHit 里，见 drawScrollbarGML 的登记）；命中就不挂定时器。 */
+  const onScrollbar = (typeof UI.sbHit !== 'undefined' && Array.isArray(UI.sbHit))
+    && UI.sbHit.some((r) => r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h);
   touchClearTimer();
-  TOUCH.timer = setTimeout(touchFireLongPress, TOUCH.longPressMs);
+  if (!onScrollbar) TOUCH.timer = setTimeout(touchFireLongPress, TOUCH.longPressMs);
 }
 
 function touchPointerMove(e) {

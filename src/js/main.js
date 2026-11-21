@@ -91,9 +91,36 @@ const SETTINGS_FIELDS = [
   'sch_exp_stereo', 'sch_exp_velocity', 'sch_exp_circuitry', 'sch_exp_vertical',
   'sch_exp_polyphony', 'sch_exp_layer1', 'sch_exp_layer2', 'sch_exp_layer3',
   'sch_exp_range_start', 'sch_exp_range_end',
+  /* 【schematic 导出里之前漏存的一大批判定项 —— 对照
+     save_settings.gml:100-124（[schematic_export] 段）】
+     · 垫底方块三件套（走道 / 电路 / 地面）：每个都是 id + data 两个值，
+       用户改过之后导出文件里音符盒下方铺的方块种类就变了，
+       不持久化等于每次刷新都被 reset_schematic_export 覆盖回默认。
+     · include_locked / compress / loop：是否包含静音层、是否压缩图层、是否循环。
+     · minecart：矿车道。
+     · ins_block_N / ins_data_N：每个音色的底座方块（按索引展开，单独处理）。 */
+  'sch_exp_walkway_block', 'sch_exp_walkway_data',
+  'sch_exp_circuit_block', 'sch_exp_circuit_data',
+  'sch_exp_ground_block', 'sch_exp_ground_data',
+  'sch_exp_includelocked', 'sch_exp_compress', 'sch_exp_loop', 'sch_exp_minecart',
   'dat_mcversion', 'dat_radius', 'dat_glow', 'dat_xval', 'dat_yval', 'dat_zval',
+  /* 【数据包里之前漏存的导出选项 —— 对照 save_settings.gml:140-156】
+     名字 / 命名空间 / 路径 / 音源 / 是否 zip / 包含静音层 / 包含超范围 /
+     半径开关 / 循环 / 可视化与类型。这些不存的话，用户每次导出数据包
+     都要重新填名字和命名空间。 */
+  'dat_name', 'dat_namespace', 'dat_path', 'dat_source', 'dat_usezip',
+  'dat_includelocked', 'dat_includeoutofrange', 'dat_enableradius',
+  'dat_enablelooping', 'dat_visualizer', 'dat_vis_type',
   // 音符默认值（首选项「外观」页的 音量/声像/音高 等）
   'setvel', 'setpan', 'setpit', 'percentvel',
+  /* addpitch —— 「设定音高」的加法模式勾选（save_settings.gml:68）。
+     这个功能本身刚补完，不持久化的话刷新就丢。 */
+  'addpitch',
+  /* Tremolo 的模式与手动淡入淡出参数（save_settings.gml 对应
+     tremolotype / fade_auto / leg_dec / leg_sus，control_create.gml:548-552）。
+     以前这几个状态连初值都没有，只存在于 draw_window_macro_tremolo 的
+     单选框里，刷新后回到 undefined。 */
+  'tremolotype', 'fade_auto', 'leg_dec', 'leg_sus',
   // 自动化预设（琶音 / 颤音 / 断奏）
   'arp_pattern', 'stag_pattern', 'trem_spacing', 'stereo_width',
   // 反向与音域
@@ -132,6 +159,21 @@ function saveSettings() {
     o[k] = S[k];
   }
   o.piano_key = S.piano_key;
+  /* 【内置音色的 press（"是否会按键"）标记 —— 对照 save_settings.gml:167-170】
+     原版把前 first_custom_index（=16）个内置音色的 press 标记按
+     ins_0_press .. ins_15_press 存进 ini。我们之前完全没存，
+     用户改了「音色是否会按键」的开关，刷新页面就丢 —— 是真实的功能缺陷。
+     自定义音色不存：它们的 press 随歌曲文件里的音色段走。 */
+  if (typeof INSTRUMENTS !== 'undefined' && Array.isArray(INSTRUMENTS)) {
+    o.ins_press = INSTRUMENTS.slice(0, S.first_custom_index).map((i) => (i && i.press ? 1 : 0));
+  }
+  /* 每个音色的底座方块 —— 对照 save_settings.gml:116-124
+     （ini 里按索引展开成 ins_block_0..N / ins_data_0..N）。
+     这里存成两个数组，比逐键展开更省地方，语义相同。
+     这两个数组是惰性初始化的（schematic.js 里 `if (!S.sch_exp_ins_block)`），
+     所以可能此刻还是 undefined —— 只有真正有值时才写。 */
+  if (Array.isArray(S.sch_exp_ins_block)) o.sch_exp_ins_block = S.sch_exp_ins_block;
+  if (Array.isArray(S.sch_exp_ins_data)) o.sch_exp_ins_data = S.sch_exp_ins_data;
   try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(o)); } catch (e) { }
 }
 function loadSettings() {
@@ -139,6 +181,14 @@ function loadSettings() {
     const o = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     for (const k of SETTINGS_FIELDS) if (o[k] !== undefined) S[k] = o[k];
     if (Array.isArray(o.piano_key) && o.piano_key.length === 88) S.piano_key = o.piano_key;
+    // 内置音色的 press 标记（见 saveSettings 里的说明）
+    if (Array.isArray(o.ins_press) && typeof INSTRUMENTS !== 'undefined' && Array.isArray(INSTRUMENTS)) {
+      const n = Math.min(o.ins_press.length, S.first_custom_index, INSTRUMENTS.length);
+      for (let i = 0; i < n; i++) if (INSTRUMENTS[i]) INSTRUMENTS[i].press = !!o.ins_press[i];
+    }
+    // 每个音色的底座方块（见 saveSettings 里的说明）
+    if (Array.isArray(o.sch_exp_ins_block) && o.sch_exp_ins_block.length) S.sch_exp_ins_block = o.sch_exp_ins_block;
+    if (Array.isArray(o.sch_exp_ins_data) && o.sch_exp_ins_data.length) S.sch_exp_ins_data = o.sch_exp_ins_data;
   } catch (e) { }
 }
 
@@ -265,24 +315,62 @@ async function boot() {
   setTimeout(checkAutosaveRecovery, 600);
 }
 
+/* 按【文件后缀】判断类型并分发到对应处理器。
+   这是整个应用唯一的「打开一个文件」入口，文件菜单、问候窗口、拖拽
+   都走这里 —— 三条路径的行为必须完全一致，否则同一份文件
+   拖进来能开、从菜单选就打不开。
+
+   【为什么用后缀而不是 accept】
+   .nbs / .nbp / .cbnd 都是自定义扩展名，没有注册的 MIME 类型。
+   文件选择框的 accept 过滤在 Safari、部分 Android WebView 和若干
+   国产浏览器上对未知后缀的处理不一致，会把这些文件直接灰掉，
+   用户根本选不中 —— 表现就是「无法导入 nbs / cbnd」。
+   所以选择框不再设 accept（见 nbs.js 的 pickFile），
+   类型判断全部在这里按后缀做，行为可预期、跨浏览器一致。
+
+   返回 true 表示有人接手了，false 表示后缀不认识（调用方给提示）。 */
+async function dispatchFile(ab, name) {
+  const ext = fileExt(name);
+
+  // ---- 歌曲工程 ----
+  if (ext === 'nbs') { loadNBSToEditor(ab, name); addToRecent(name, ab); return true; }
+  // ---- MIDI（导入为歌曲） ----
+  if (ext === 'mid' || ext === 'midi') { importMidi(ab, name); return true; }
+  // ---- 片段 ----
+  if (ext === 'nbp') {
+    const r = patternImportBytes(ab);
+    if (!r.ok) messageDialog(r.msg, '提示');
+    else setMsg('片段已导入并放置在 ' + (r.x + 1) + ' 列 / ' + (r.y + 1) + ' 层');
+    return true;
+  }
+  // ---- cbnote：位流格式，从文件头判断而不是只信后缀（.cbnd 也常被改名） ----
+  if (ext === 'cbnd' || (typeof looksLikeCbnd === 'function' && looksLikeCbnd(ab))) {
+    importCbndBytes(ab, name);
+    return true;
+  }
+  // ---- cbnote：指令文本。用户常常存成 .mcfunction / .txt / .log ----
+  if (ext === 'txt' || ext === 'log' || ext === 'mcfunction' || ext === 'cmds' || ext === 'cmd') {
+    importCommandTextBytes(ab, name);
+    return true;
+  }
+  return false;
+}
+
 /* 打开一个 File 对象（浏览器 File / Blob）。
    原来这段逻辑直接内联在 drop 事件里，问候窗口的「打开本地文件…」也要用，
-   所以抽出来共用 —— 两处行为必须完全一致，否则同一份文件
-   拖进来能开、从问候窗口选就打不开。 */
+   所以抽出来共用。 */
 async function openFileObject(f) {
   if (!f) return;
-  const ext = (f.name.split('.').pop() || '').toLowerCase();
-  const ab = await f.arrayBuffer();
-  try {
-    if (ext === 'nbs') { loadNBSToEditor(ab, f.name); addToRecent(f.name, ab); }
-    else if (ext === 'mid' || ext === 'midi') importMidi(ab, f.name);
-    else if (ext === 'nbp') {
-      /* 与菜单「导入片段」同一个函数，导入后立刻落地 */
-      const r = patternImportBytes(ab);
-      if (!r.ok) messageDialog(r.msg, '提示');
-      else setMsg('片段已导入并放置在 ' + (r.x + 1) + ' 列 / ' + (r.y + 1) + ' 层');
-    } else messageDialog('不支持的文件类型：.' + ext, '错误');
-  } catch (err) { messageDialog('打开失败：' + err.message, '错误'); }
+  let ab;
+  try { ab = await f.arrayBuffer(); }
+  catch (e) { messageDialog('读取文件失败：' + e.message, '错误'); return; }
+  let ok = false;
+  try { ok = await dispatchFile(ab, f.name); }
+  catch (e) { messageDialog('打开失败：' + e.message, '错误'); return; }
+  if (!ok) {
+    messageDialog('不支持的文件类型：' + (fileExt(f.name) || '（无扩展名）')
+      + '\n\n支持：.nbs .nbp .mid .midi .cbnd .txt .mcfunction', '错误');
+  }
 }
 
 // 调试/自动化测试钩子（不影响正常使用）

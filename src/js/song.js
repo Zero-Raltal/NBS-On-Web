@@ -29,6 +29,9 @@ const S = {
   show_welcome: 1,
   show_soundcount: 0,
   hires: 1, clickinarea: 0, cursmarker: 0, timeline_pressa: -1,
+  /* volume_scroll —— 指针是否停在主音量条上（control_create.gml:163）。
+     为 1 时两条滚动条的滚轮分支整体失效，滚轮只改主音量。 */
+  volume_scroll: 0,
   // MIDI 导入选项（对应 w_midi_* 系列变量）
   midiRemoveSilent: 1, midiNameLayers: 1, midiNamePatch: 1, midiTempo: 1, midiOctave: 0,
   /* midiTempoChanger：「速度变化」——把 MIDI 里的变速事件也导入（对照 w_midi_tempo_changer）。
@@ -63,10 +66,24 @@ const S = {
   song_name: '', song_author: '', song_orauthor: '', song_desc: '',
   work_mins: 0, work_left: 0, work_right: 0, work_add: 0, work_remove: 0,
   save_version: 5, nbs_loaded_version: 0,
+  /* 首选项「通用」页用到的几个开关 —— 对照 save_settings.gml / load_settings.gml：
+       show_welcome     显示欢迎界面
+       check_update     检查更新
+       check_prerelease 检查开发版本（受 check_update 门控）
+       tonextsave       距离下次自动保存还剩几分钟（GML 里是倒计时）
+     tonextsave 在 GML 里由 autosave 开关重置（draw_window_preferences.gml:205-208、
+     :220），不是设置项、不持久化。 */
+  check_update: 0, check_prerelease: 0, tonextsave: 0,
   // 选择
   selected: 0, select: 0, dontplace: 0, clickinarea: 0,
   selbx: -1, selby: -1, sela: -1, selb: -1,
   drag: 0, drag_pressx: -1, drag_pressy: -1,
+  /* draginc* —— 拖拽到画布边缘时的自动滚屏累加量
+     （对照 control_create.gml 的 dragincxr/xl/yd/yu）。 */
+  dragincxr: 0, dragincxl: 0, dragincyd: 0, dragincyu: 0,
+  /* sbh_anim / sbv_anim —— 全屏浮动滚动条的升起量 0..16
+     （对照 control_create.gml 的 sbh_anim / sbv_anim）。 */
+  sbh_anim: 0, sbv_anim: 0,
   select_pressx: -1, select_pressy: -1, select_pressa: -1, select_pressb: -1,
   timeline_pressa: -1,
   // 其它
@@ -74,6 +91,10 @@ const S = {
   tutorial_tempobox: 0, delay: 0, insbox_start: 0, showinsbox: 0,
   editline: 0, msgtext: '', msgtime: 0, dropmode: 0,
   windowsound: 0, remove_effect: 1, aa: 0,
+  /* 音频导出选项，对照 control_create.gml:540-543 的初值：
+     audio_exp_format = "MP3" / sample_rate = 44100 / channels = 2 / include_locked = 0
+     浏览器只能编码 WAV，所以 format 这里不设状态、固定 WAV，其余三项照原样保存。 */
+  audio_exp_sample_rate: 44100, audio_exp_channels: 2, audio_exp_include_locked: 0,
   // 绘制时计算
   x1: 0, y1: 52, totalcols: 0, totalrows: 0, rhval: 270, note_offset: 0,
   // 网格数据
@@ -484,8 +505,63 @@ function recalcSong() {
 
 /* 图层操作 */
 // 在 index 处插入一个空层（把 index 及其后的层整体下移）
+/* 【独奏列表随层增删平移 —— 对照 add_layer.gml / remove_layer.gml】
+   S.solostr 形如 "|3|7|"，记录的是"处于独奏的层号"。
+   增删层时层号会变，独奏列表里的数字必须跟着平移，否则独奏会指向错的层
+   （表现为"删掉一层后，原本独奏的那层突然不响了，旁边那层开始响"）。
+   之前 addLayer / removeLayer 完全没碰 solostr，是实打实的功能错误。
+
+   下面两个函数逐行对应 GML 的字符串处理：
+     add_layer.gml:25-40  把 > num 的层号 +1，若 lock==2 再追加 |num|
+     add_layer.gml:64    再把 |num| 改写成 |num+1|（旧层上移一位）
+     remove_layer.gml:9  先摘掉 |num|
+     remove_layer.gml:12-24 把 > num 的层号 -1
+   注意 GML 的循环是在【原始串】上取字符、在【结果串】上做替换，
+   所以这里也保留 orig / result 两份，不要边遍历边改同一个串。 */
+function soloShiftAdd(num, lock) {
+  const orig = S.solostr || '';
+  let s = orig;
+  if (orig !== '') {
+    let solonum = '';
+    for (let i = 0; i < orig.length; i++) {
+      const ch = orig[i];
+      if (ch >= '0' && ch <= '9') solonum += ch;
+      else if (ch === '|' && solonum !== '' && parseInt(solonum, 10) > num) {
+        s = s.split('|' + solonum + '|').join('|' + (parseInt(solonum, 10) + 1) + '|');
+        solonum = '';
+      }
+    }
+  }
+  if (lock === 2) s += '|' + num + '|';
+  S.solostr = s;
+  /* 对应 add_layer.gml:64：插入点那一层及其以上整体上移一位，
+     所以原来的 |num| 要改成 |num+1|。
+     （GML 在上一行刚为 lock==2 追加过 |num|，这一步会把它也挪到 num+1；
+      该分支只在撤销/重放带独奏的层时触发，此处按原版原样照搬。） */
+  S.solostr = (S.solostr || '').split('|' + num + '|').join('|' + (num + 1) + '|');
+}
+
+function soloShiftRemove(num) {
+  let s = (S.solostr || '').split('|' + num + '|').join('');
+  if (s !== '') {
+    let solonum = '';
+    const orig = s;
+    for (let i = 0; i < orig.length; i++) {
+      const ch = orig[i];
+      if (ch >= '0' && ch <= '9') solonum += ch;
+      else if (ch === '|' && solonum !== '' && parseInt(solonum, 10) > num) {
+        s = s.split('|' + solonum + '|').join('|' + (parseInt(solonum, 10) - 1) + '|');
+        solonum = '';
+      }
+    }
+  }
+  S.solostr = s;
+}
+
 function addLayer(index, undo, name, lock, vol, stereo) {
   if (index === undefined) index = S.endb2;
+  /* 独奏列表先平移，再搬数据（顺序与 GML 一致：GML 在搬数据之前就更新了 solostr） */
+  soloShiftAdd(index, lock);
   growRowArrays(S.endb2 + 3);
   const last = Math.max(S.endb2, index + 1);
   for (let b = last; b > index; b--) {
@@ -524,6 +600,8 @@ function addLayer(index, undo, name, lock, vol, stereo) {
   if (!undo) historySet(H_ADDLAYER, { index });
 }
 function removeLayer(index, undo) {
+  /* 独奏列表先摘掉被删层、再把上方层号 -1（对照 remove_layer.gml:9-24） */
+  soloShiftRemove(index);
   const snapshot = {
     index,
     name: S.layername[index], lock: S.layerlock[index],

@@ -89,8 +89,17 @@ function playSound(ins, key, vol, pan, pit, when) {
   const g = AU.ctx.createGain();
   g.gain.value = gainV;
   const p = AU.ctx.createStereoPanner();
-  // GML: audio_emitter_position(emitter, pan, 0, 0)，pan 0..200（100 为中央）
-  p.pan.value = clamp((pan - 100) / 100, -1, 1);
+  /* 对照 play_sound.gml:25-26：
+       if (realstereo = 0) audio_emitter_position(emitter, pan, 0, 0)
+       else                audio_emitter_position(emitter, 100, 0, 0)
+     也就是说勾上首选项里的「关闭立体声」（realstereo = 1）之后，
+     无论音符/层的声像是什么值，都强制按 100（正中央）发声 —— 单声道输出。
+     【之前这里无条件用 pan】，S.realstereo 只在复选框里被翻来翻去，
+     对发声没有任何影响，所以那个设置项是完全失效的。
+     pan 的取值是 0..200，100 为中央；StereoPannerNode 要的是 -1..1，
+     所以换算成 (pan - 100) / 100。 */
+  const panVal = (S.realstereo ? 100 : pan);
+  p.pan.value = clamp((panVal - 100) / 100, -1, 1);
   src.connect(g); g.connect(p); p.connect(AU.master);
   /* when 必须是 ctx 时间轴上的绝对时刻；早于当下就立即播（start(0) 的语义是「马上」）。
      留 10ms 余量，避免边界上被判定为过去时刻。 */

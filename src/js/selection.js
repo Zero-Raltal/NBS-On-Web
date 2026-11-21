@@ -122,8 +122,219 @@ function selectionCodeUpdate() {
   SEL.code = out;
 }
 
-function tryCompressSelection(s) { return s; }
-function tryDecompressSelection(s) { return s || ''; }
+/* ============================================================================
+ * 选区代码的压缩 / 解压 —— 对照 try_compress_selection.gml / try_decompress_selection.gml
+ *
+ * 【原版怎么做】
+ *   try_compress_selection（gml:1-27）：
+ *       str_len < 16 → 原样返回
+ *       否则 buffer_compress（zlib）→ buffer_base64_encode，
+ *       只有【压缩结果比原文短】才采用，否则仍返回原文。
+ *   try_decompress_selection（gml:1-25）：
+ *       含 "|" → 说明是明文，原样返回
+ *       不含 "|" → 当作 base64 的 zlib 流，解压后返回
+ *
+ * 【为什么必须补】
+ *   我们之前这两个函数是恒等占位。后果是单向不兼容：
+ *   · 原版导出的 .nbp 片段、以及 .nbs 里存的选区，都是 base64 压缩串；
+ *     我们用 split('|') 去解析它 —— 里面一个 "|" 都没有，
+ *     整段解析失败 → 导入空选区。
+ *   · 反过来我们导出明文时，原版 try_decompress_selection 见到 "|"
+ *     会原样返回，所以那个方向能读。
+ *   因此【只需要实现解压】就能补上兼容性；导出继续写明文即可
+ *   （pattern_export.gml:23 本身也是 try_decompress_selection 后写明文）。
+ *
+ * 【为什么用 zlib 而不是别的】
+ *   GameMaker 的 buffer_compress 产出的是标准 zlib 流（RFC1950，带 0x78 头、
+ *   Adler-32 尾）。浏览器原生没有同步的 zlib 解压 API
+ *   （CompressionStream 是异步的，而这条调用链是同步的），
+ *   所以这里内置一个纯 JS 的 inflate（RFC1951）。
+ * ========================================================================== */
+
+/* 构造 Huffman 解码表（与 puff 的做法一致，最多 15 位码长）。 */
+function _zipBuildHuff(lengths, n) {
+  const MAXBITS = 15;
+  const count = new Int32Array(MAXBITS + 1);
+  for (let i = 0; i < n; i++) count[lengths[i]]++;
+  count[0] = 0;
+  const offs = new Int32Array(MAXBITS + 2);
+  for (let i = 1; i <= MAXBITS; i++) offs[i] = offs[i - 1] + count[i - 1];
+  const symbol = new Int32Array(n);
+  for (let i = 0; i < n; i++) if (lengths[i]) symbol[offs[lengths[i]]++] = i;
+  return { count, symbol };
+}
+
+const _ZIP_LBASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
+const _ZIP_LEXT = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
+const _ZIP_DBASE = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
+const _ZIP_DEXT = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+const _ZIP_CLORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+
+/* zlib 流 → 原始字节。任何异常/格式不符都返回 null（调用方回退到原文）。 */
+function zlibInflate(data) {
+  if (!data || data.length < 6) return null;
+  let pos = 0;
+  const cmf = data[pos++], flg = data[pos++];
+  if ((cmf & 0x0f) !== 8) return null;              // 必须 deflate
+  if ((cmf >> 4) > 7) return null;                  // 窗口大小上限
+  if (((cmf << 8) | flg) % 31 !== 0) return null;   // 头校验
+  if (flg & 0x20) return null;                      // 不支持预置字典
+
+  let bitbuf = 0, bitcnt = 0;
+  const getBit = () => {
+    if (bitcnt === 0) {
+      if (pos >= data.length) throw new Error('EOF');
+      bitbuf = data[pos++];
+      bitcnt = 8;
+    }
+    const b = bitbuf & 1;
+    bitbuf >>= 1;
+    bitcnt--;
+    return b;
+  };
+  const getBits = (n) => { let v = 0; for (let i = 0; i < n; i++) v |= getBit() << i; return v; };
+  const decode = (h) => {
+    let code = 0, first = 0, index = 0;
+    for (let len = 1; len <= 15; len++) {
+      code |= getBit();
+      const cnt = h.count[len];
+      if (code - first < cnt) return h.symbol[index + (code - first)];
+      index += cnt;
+      first = (first + cnt) << 1;
+      code <<= 1;
+    }
+    return -1;
+  };
+
+  const out = [];
+  let fixedLit = null, fixedDist = null;
+
+  function inflateBlock(litHuff, distHuff) {
+    while (true) {
+      const sym = decode(litHuff);
+      if (sym < 0) return -1;
+      if (sym < 256) { out.push(sym); }
+      else if (sym === 256) return 0;
+      else {
+        const li = sym - 257;
+        if (li >= _ZIP_LBASE.length) return -1;
+        const len = _ZIP_LBASE[li] + getBits(_ZIP_LEXT[li]);
+        const ds = decode(distHuff);
+        if (ds < 0 || ds >= _ZIP_DBASE.length) return -1;
+        const dist = _ZIP_DBASE[ds] + getBits(_ZIP_DEXT[ds]);
+        if (dist > out.length) return -1;
+        const start = out.length - dist;
+        for (let i = 0; i < len; i++) out.push(out[start + i]);
+      }
+    }
+  }
+
+  try {
+    let last = 0;
+    while (!last) {
+      last = getBit();
+      const type = getBits(2);
+      if (type === 0) {
+        // stored：对齐到字节边界后直接拷贝
+        bitbuf = 0; bitcnt = 0;
+        if (pos + 4 > data.length) return null;
+        const len = data[pos] | (data[pos + 1] << 8);
+        const nlen = data[pos + 2] | (data[pos + 3] << 8);
+        pos += 4;
+        if ((len ^ 0xffff) !== nlen) return null;
+        for (let i = 0; i < len; i++) out.push(data[pos++]);
+      } else if (type === 1) {
+        // 固定 Huffman 表
+        if (!fixedLit) {
+          const l = new Uint8Array(288);
+          for (let i = 0; i < 144; i++) l[i] = 8;
+          for (let i = 144; i < 256; i++) l[i] = 9;
+          for (let i = 256; i < 280; i++) l[i] = 7;
+          for (let i = 280; i < 288; i++) l[i] = 8;
+          fixedLit = _zipBuildHuff(l, 288);
+          fixedDist = _zipBuildHuff(new Uint8Array(30).fill(5), 30);
+        }
+        if (inflateBlock(fixedLit, fixedDist) < 0) return null;
+      } else if (type === 2) {
+        // 动态 Huffman 表
+        const hlit = getBits(5) + 257;
+        const hdist = getBits(5) + 1;
+        const hclen = getBits(4) + 4;
+        const clLens = new Uint8Array(19);
+        for (let i = 0; i < hclen; i++) clLens[_ZIP_CLORDER[i]] = getBits(3);
+        const clHuff = _zipBuildHuff(clLens, 19);
+        const lens = new Uint8Array(hlit + hdist);
+        let idx = 0;
+        while (idx < hlit + hdist) {
+          const sym = decode(clHuff);
+          if (sym < 0) return null;
+          if (sym < 16) { lens[idx++] = sym; }
+          else if (sym === 16) {
+            if (idx === 0) return null;
+            const prev = lens[idx - 1];
+            const rep = 3 + getBits(2);
+            for (let i = 0; i < rep && idx < lens.length; i++) lens[idx++] = prev;
+          } else if (sym === 17) {
+            const rep = 3 + getBits(3);
+            for (let i = 0; i < rep && idx < lens.length; i++) lens[idx++] = 0;
+          } else {
+            const rep = 11 + getBits(7);
+            for (let i = 0; i < rep && idx < lens.length; i++) lens[idx++] = 0;
+          }
+        }
+        const litHuff = _zipBuildHuff(lens.subarray(0, hlit), hlit);
+        const distHuff = _zipBuildHuff(lens.subarray(hlit), hdist);
+        if (inflateBlock(litHuff, distHuff) < 0) return null;
+      } else {
+        return null;   // type 3 非法
+      }
+    }
+  } catch (e) {
+    return null;
+  }
+  return Uint8Array.from(out);
+}
+
+/* base64 → 字节。atob 只接受标准 base64，这里补上 URL-safe 变体与填充。 */
+function _b64ToBytes(s) {
+  let t = String(s).replace(/-/g, '+').replace(/_/g, '/').replace(/\s+/g, '');
+  while (t.length % 4) t += '=';
+  const bin = atob(t);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/* 对照 try_compress_selection.gml。
+   导出方向【故意只返回原文】：
+   · 原版 pattern_export.gml:23 写文件前也要 try_decompress_selection 成明文；
+   · 我们的明文能被原版正常读取（它见到 "|" 就原样返回）；
+   · 反过来若这里做压缩，就必须同时保证 .nbs 内部各处读回也解压，
+     收益只是体积，风险是又引入一条双向兼容路径。
+   保持明文 = 与「导出即可互读」这个目标一致，且代码里已注明。 */
+function tryCompressSelection(s) { return s || ''; }
+
+/* 对照 try_decompress_selection.gml:1-25 */
+function tryDecompressSelection(s) {
+  s = s || '';
+  if (s === '') return s;
+  /* 含 "|" 就是明文（base64 字母表里没有 "|"，所以这个判据是可靠的，
+     与原版 gml:9-10 完全一致） */
+  if (s.indexOf('|') >= 0) return s;
+  try {
+    const raw = zlibInflate(_b64ToBytes(s));
+    if (!raw || !raw.length) return s;
+    /* 解出来的必须是 ASCII 明文，否则说明这不是选区串，回退原文 */
+    let str = '';
+    const CH = 8192;
+    for (let i = 0; i < raw.length; i += CH) {
+      str += String.fromCharCode.apply(null, raw.subarray(i, Math.min(i + CH, raw.length)));
+    }
+    return str.indexOf('|') >= 0 ? str : s;
+  } catch (e) {
+    return s;
+  }
+}
 
 // 把 code 解析成块列表（用于粘贴 / 快照）
 // 编码格式见 selectionCodeUpdate() / GML selection_code_update()：
@@ -540,8 +751,20 @@ function playSelectionNote(xx, b, i) {
 
 /* ---------------------------------------------------------------- 从 code 放置选区 */
 function selectionLoad(x, y, code, undo) {
+  /* 【必须先把"当前浮动的选区"放回歌曲 —— 对照 selection_load.gml:7-9】
+       str = try_decompress_selection(argument2)
+       selection_place(argument3)      ← 关键
+       if (str = "") return 0
+     原版在解析新片段之前，会先把手上那个浮动选区（被 selection_add 抬走、
+     song_exists 已被清零的那些方块）放回 songs 里。
+     我们之前直接 selectionReset()，只清空选区缓冲区、S.selected = 0，
+     【没有把方块放回歌曲】—— 于是已有选区存在时，任何走 selectionLoad 的路径
+     （粘贴、撤销/重做复原、pattern_import）都会让那些音符永久消失。
+     这就是"选区还在但音符没了"的直接来源。 */
+  const str = tryDecompressSelection(code);
+  selectionPlace(undo);
   selectionReset();
-  const blocks = selectionParseCode(code);
+  const blocks = selectionParseCode(str);
   if (!blocks.length) return 0;
   let maxA = 0, maxB = 0;
   SEL.x = floor(x); SEL.y = floor(y);

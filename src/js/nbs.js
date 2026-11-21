@@ -71,9 +71,20 @@ function readNBS(arrayBuffer, fileName) {
     if (nbsVer >= 3) r.short(); // 歌曲长度（重复）
     if (nbsVer > 5) throw new Error('该文件由更新版本的 Note Block Studio 保存（v' + nbsVer + '）。');
   } else {
+    /* 【旧格式（v0）：绝不能把指针拨回 0】
+      对照 open_song_nbs.gml:7-38：
+        byte1 = buffer_read_byte()
+        byte2 = buffer_read_byte()
+        if (byte1 = 0 && byte2 = 0) { …新格式… }
+        else { song_nbs_version = 0 … }      ← 不做任何回溯
+        hei = buffer_read_short()
+      旧格式的头两个字节【就是歌曲长度这个 short 的高低位】，已经被上面消费掉了，
+      所以此刻指针正好停在「层数」前面，紧接着的 r.short() 读到的才是真正的层数。
+      之前这里写了 `r.p = 0` 把指针拨回文件开头，于是 r.short() 读到的又是歌曲长度，
+      后面的层数、歌名、速度等字段整体错位，整首 v0 文件被解析成乱码或直接 EOF。 */
     nbsVer = 0;
     firstCustom = 0;
-    r.p = 0;
+    customIndexDiff = 0;
   }
   const height = r.short();
   const song = {
@@ -171,14 +182,27 @@ function loadNBSToEditor(data, fileName) {
     if (c.press) ins.press = true;
   }
   // 图层
+  /* 【必须从 layerlock == 2 重建 solostr —— 对照 open_song_nbs.gml:151-154】
+     原版读到 layerlock[b] == 2 时会 `solostr += "|" + string(b) + "|"`。
+     我们之前只把 lock 存进 S.layerlock，完全不重建 solostr，
+     于是打开一首带独奏的 .nbs 后，所有层一起发声（solostr 为空 = 不做独奏过滤），
+     而原版只发独奏层。保存方向是好的（buildNBS 写了 layerlock，
+     原版读回来会重建 solostr），所以这是「能存不能读」的单向不一致。 */
+  S.solostr = '';
   for (let i = 0; i < parsed.layers.length; i++) {
     S.layername[i] = parsed.layers[i].name;
     S.layerlock[i] = parsed.layers[i].lock;
     S.layervol[i] = parsed.layers[i].vol;
     S.layerstereo[i] = parsed.layers[i].stereo;
     rowamount[i] = 0;
+    if (S.layerlock[i] === 2) S.solostr += '|' + i + '|';
   }
   S.endb2 = Math.max(1, parsed.layers.length);
+  /* 对照 open_song_nbs.gml:160：只要读到的层里有音量不是 100 的，
+     就自动打开「显示每层音量」，否则用户会看不见这些层音量（虽然播放时仍生效）。 */
+  for (let i = 0; i < parsed.layers.length; i++) {
+    if (parsed.layers[i].vol < 100) S.realvolume = 1;
+  }
   // 音符（逆序添加，与 GML 一致以保证性能）
   for (let i = parsed.notes.length - 1; i >= 0; i--) {
     const n = parsed.notes[i];
@@ -202,14 +226,40 @@ function loadNBSToEditor(data, fileName) {
 function buildNBS(version) {
   const w = new ByteWriter();
   version = version === undefined ? 5 : version;
-  w.short(0);
-  w.byte(version);
-  w.byte(S.first_custom_index);
-  if (version >= 3) w.short(S.enda);
-  w.short(Math.max(1, S.endb2));
+  /* 对照 save_song.gml:28-39：
+       if nbsver >= 1 {
+           buffer_write_short(0)          // 前两个 0，标识「新格式」
+           buffer_write_byte(nbsver)
+           buffer_write_byte(first_custom_index)
+       }
+       if nbsver = 0 || nbsver >= 3 {
+           buffer_write_short(enda)      // 歌曲长度
+       }
+     也就是说：
+       · v0 文件【没有】00 00 头，直接从歌曲长度（short）开始，然后才是层数；
+       · 只有 v1/v2 会跳过歌曲长度（头里没有这个字段）；
+       · v3 及以上既写 00 00 头、又写歌曲长度。
+     之前无论版本都写 short(0)+byte(version)+byte(first_custom_index)，
+     且只在 version >= 3 时写歌曲长度 —— 于是导出的 v0 是「新格式头 + 版本 0 +
+     缺歌曲长度」的混合体，按经典 v0 规范读的工具会把头两个 0 当成层数 0。 */
+  if (version >= 1) {
+    w.short(0);
+    w.byte(version);
+    w.byte(S.first_custom_index);
+  }
+  if (version === 0 || version >= 3) {
+    w.short(S.enda);
+  }
+  /* 层数直接写 S.endb2（对照 save_song.gml:42 的 buffer_write_short(endb2)）。
+     之前用 Math.max(1, …) 强行兜底，空歌曲会被写成 1 个空层，
+     与原版产物差 1 层。 */
+  w.short(S.endb2);
   w.str(S.song_name); w.str(S.song_author); w.str(S.song_orauthor); w.str(S.song_desc);
   w.short(Math.round(S.tempo * 100));
-  w.byte(0); w.byte(10); w.byte(S.timesignature);
+  /* 对照 save_song.gml:50-53：这两个字段虽然已废弃，但原版仍写歌曲上的真实值
+     （注释说明是为了兼容旧版的自动保存行为）。之前写死 0 / 10，
+     保存后再用旧版 NBS 打开，自动保存配置会被重置。 */
+  w.byte(S.autosave || 0); w.byte(S.autosavemins === undefined ? 10 : S.autosavemins); w.byte(S.timesignature);
   w.int(floor(S.work_mins)); w.int(S.work_left); w.int(S.work_right); w.int(S.work_add); w.int(S.work_remove);
   w.str(S.song_midi || '');
   if (version >= 4) { w.byte(S.loop); w.byte(S.loopmax); w.short(S.loopstart); }
@@ -338,15 +388,40 @@ function downloadBytes(bytes, name, mime) {
   setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 60000);
 }
 
+/* 选择本地文件并读成 ArrayBuffer。
+   【为什么不再设置 input.accept】
+   原来每个调用点都传一串扩展名（'.nbs,.mid,.midi,.nbp' 之类），
+   accept 会让文件选择器按扩展名/ MIME 【强过滤】：
+     · .nbs / .nbp / .cbnd 都是自定义后缀，没有注册的 MIME 类型；
+     · Safari（含 iOS）、部分 Android WebView 以及一些国产浏览器的内核，
+       对未知扩展名的处理不一致 —— 有的直接把这些文件灰掉、选不中，
+       有的把过滤规则整个忽略掉，还有的只认 ".*" 这种写法。
+   结果就是用户明明有这个文件，却在选择框里看不到 / 点不动，
+   表现为「无法导入 nbs / cbnd」，而且换台机器又好了，极难排查。
+   所以统一不设 accept，让选择器显示所有文件，类型判断完全交给
+   JavaScript（按后缀分发，见下面的 dispatchFile / openFileObject）。
+   代价是用户可能选到不支持的文件 —— 那种情况会走到默认分支给出明确提示，
+   比"文件根本选不中"好得多。
+
+   参数 accept 保留是为了兼容既有调用点的签名，但已不再生效。
+   如果将来要支持拖拽之外的过滤，请用 dispatchFile 的后缀白名单，
+   不要依赖浏览器的 accept。 */
 function pickFile(accept, cb) {
   const inp = document.createElement('input');
   inp.type = 'file';
-  inp.accept = accept;
+  /* 显式清空。某些浏览器会沿用上一次 input 的设置，这里写死更保险。 */
+  inp.accept = '';
   inp.onchange = () => {
-    const f = inp.files[0];
+    const f = inp.files && inp.files[0];
     if (f) f.arrayBuffer().then(ab => cb(ab, f.name));
   };
   inp.click();
+}
+
+/* 从文件名取小写扩展名（不含点）。'a.b.NBS' -> 'nbs'，无扩展名 -> '' */
+function fileExt(name) {
+  const m = /\.([^./\\]+)$/.exec(String(name || ''));
+  return m ? m[1].toLowerCase() : '';
 }
 
 function saveSongFile(asNew) {
@@ -368,18 +443,17 @@ function saveSongFile(asNew) {
 }
 
 function loadSongDialog() {
-  const doOpen = () => pickFile('.nbs,.mid,.midi,.nbp', (ab, name) => {
-    const ext = (name.split('.').pop() || '').toLowerCase();
-    try {
-      if (ext === 'nbs') { loadNBSToEditor(ab, name); addToRecent(name, ab); }
-      else if (ext === 'mid' || ext === 'midi') importMidi(ab, name);
-      else if (ext === 'nbp') {
-        /* 与「导入片段......」走同一个函数，导入后立刻落地，不留浮动选区 */
-        const r = patternImportBytes(ab);
-        if (!r.ok) messageDialog(r.msg, '提示');
-        else setMsg('片段已导入并放置在 ' + (r.x + 1) + ' 列 / ' + (r.y + 1) + ' 层');
+  /* 不再传 accept 白名单，也不再在这里写自己的 if/else 分发 ——
+     统一交给 dispatchFile()（main.js），它按后缀判断类型，
+     与拖拽打开、问候窗口的「打开本地文件…」走同一条路径。
+     这样三种打开方式对同一份文件的行为必然一致。 */
+  const doOpen = () => pickFile('', (ab, name) => {
+    dispatchFile(ab, name).then(ok => {
+      if (!ok) {
+        messageDialog('不支持的文件类型：' + (fileExt(name) || '（无扩展名）')
+          + '\n\n支持：.nbs .nbp .mid .midi .cbnd .txt .mcfunction', '错误');
       }
-    } catch (e) { messageDialog('打开失败：' + e.message, '错误'); }
+    }).catch(e => messageDialog('打开失败：' + e.message, '错误'));
   });
   if (S.changed) confirmDialogOn(ok => { if (ok) doOpen(); }, '当前歌曲尚未保存，确定要打开其他歌曲吗？', '打开歌曲');
   else doOpen();

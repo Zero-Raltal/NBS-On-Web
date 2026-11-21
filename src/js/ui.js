@@ -8,6 +8,10 @@ const UI = {
   textFocus: -1,
   textStr: {},          // id -> string
   caret: {},            // id -> 光标位置
+  /* 多行文本域（drawTextarea）的缓存与滚动。与 textStr/caret 分开存，
+     因为同一个 id 不该同时被单行框和多行框使用，分开更不容易互相污染。 */
+  textareaStr: {},      // id -> string（含 \n）
+  textareaScroll: {},   // id -> 顶部可见视觉行号
   allowBlurOnClick: false,
   popup: null,          // 当前悬停提示
   popupShownAt: 0,
@@ -22,6 +26,17 @@ const UI = {
      会让 drawWindows 停止绘制（详见 drawDragValue 的注释）。 */
   dragLock: -1,
   clickedThisFrame: false,
+  /* 拖拽状态标志（由 editorFrame 每帧写入 / 读取）：
+     dragHeld   —— 本帧处于"某次按住拖动"中，用于屏蔽其它控件。
+                   判据是拖拽状态变量，【不依赖 G.mb[0]】（触屏长按会清掉它）。
+     sbHit      —— 横向/纵向滚动条的命中矩形，touch.js 用它决定是否
+                   跳过长按计时器（按住滚动条超过 450ms 不能被当成长按）。
+     tempoDragged —— 速度滑块刚被拖动过；会延续到松手那一帧之后才清，
+                   避免"松手位置下面的按钮被触发"。 */
+  dragHeld: false,
+  sbHit: [],
+  tempoDragged: false,
+  canvasPressRaw: false,
 };
 
 /* ============================== 文本输入 ================================= */
@@ -95,7 +110,25 @@ function textEdit(id, str, x, y, w, h) {
     disp = disp.slice(disp.length - i);
   }
   setColor(C.text);
-  text(x, y + Math.max(0, (h - 12) / 2) - 1, disp);
+  /* 【垂直位置：让文字在框 h 内居中，且不压到 sprite 的边框】
+     实测（1280x850，scale=1，逐像素量 spr_layerbox 帧 0）：
+       sprite 的名称输入框上下边框在【相对 ly 的 y=9 和 y=22】，
+       即内框 = ly+10 .. ly+21，净高 12px。
+     经典/复古/暗黑传入 h=14、Fluent 传入 h=24，两者内框高度不同，
+     所以这里按"框内实际可用高度"居中，而不是套一个固定偏移：
+       目标文字高度 ≈ 10px（12px 字号的实际墨迹高度）
+       经典类：可用 10..22 → 净 12 → 上留 1、下留 1
+       Fluent：可用 4..27  → 净 23 → 上留 6、下留 6
+     `(h - 12)/2 - 1` 这个旧公式在 h=14 时恒等于 0，等于【完全没居中】，
+     文字贴在框的上沿（实测文字顶比内框顶还高 1px）——
+     用户报的"层名称文字和框没有对齐，差一点点"就是它。
+     不要在这里加 `-1 * !is_ascii`（draw_text_dynamic.gml:60 那个补偿）：
+     那是 draw_text_dynamic 内部做逐字绘制时才需要的，层名走的是
+     draw_text_edit（control_draw.gml:1320），没有这个偏移，加了反而上移过头。 */
+  const inkH = 10;                                  // 12px 字号的墨迹高度
+  const boxTop = 0;                                 // 相对 h 的可用区起点
+  const ty = y + boxTop + Math.max(0, Math.floor((h - inkH) / 2)) - (h === 14 ? 1 : 0);
+  text(x, ty, disp);
   if (focused) {
     const caretPos = clamp(UI.caret[id] || 0, 0, txt.length);
     const before = txt.slice(Math.max(0, txt.length - disp.length), caretPos);
@@ -110,6 +143,139 @@ function textEdit(id, str, x, y, w, h) {
   }
   return val;
 }
+/* ============================ 多行文本域 ================================ */
+/* 对照 draw_textarea.gml —— 原版签名：
+     draw_textarea(id, x, y, w, h, val, str[, hoffset[, alpha[, notwindow]]])
+   它内部把真正的编辑交给 draw_text_edit(..., multiline = 0)，即"可换行"模式。
+   我们之前的 textEdit 是单行尾截断实现，歌曲简介只能塞进 310×24 的输入框，
+   与原版 240×100 的多行区域完全不同（长简介看不全、也不能换行）。
+
+   这里实现一个可用的多行文本域：
+     · 按 \n 分行；超宽自动软换行（原版 text_line_wrap 的等价行为）
+     · 点击定位光标（行、列）
+     · 上下键跨行移动光标，Enter 插入换行
+     · 内容超高时按光标位置自动滚动
+   不追求逐像素复刻原版的选区/双击选词（那部分另行说明），
+   但"能看到全文、能换行、能编辑"这三件核心行为已经对齐。 */
+function drawTextarea(id, x, y, w, h, val, str) {
+  const focused = UI.textFocus === id;
+  if (!focused) UI.textareaStr[id] = val === undefined ? '' : val;
+  const txt = UI.textareaStr[id] === undefined ? '' : UI.textareaStr[id];
+
+  const c = G.ctx;
+  c.font = FONT.small();
+  const lineH = 14;
+  const padX = 3, padY = 3;
+  const innerW = w - 6;
+  const innerH = h - 6;
+
+  /* 1. 逻辑行（按 \n 切）→ 视觉行（软换行展开） */
+  const logical = txt.split('\n');
+  const vis = [];   // { li, text, colStart }
+  for (let li = 0; li < logical.length; li++) {
+    const src = logical[li];
+    if (src === '') { vis.push({ li, text: '', colStart: 0 }); continue; }
+    let cur = '', colStart = 0;
+    for (let k = 0; k < src.length; k++) {
+      const nxt = cur + src[k];
+      if (c.measureText(nxt).width > innerW && cur !== '') {
+        vis.push({ li, text: cur, colStart });
+        cur = src[k];
+        colStart = k;
+      } else cur = nxt;
+    }
+    vis.push({ li, text: cur, colStart });
+  }
+
+  /* 2. 框体：参照 draw_textarea.gml:31 的填充矩形 + 边框。
+        non-Fluent 用 draw_area 的三段式（这里简化为填充 + 描边，颜色取主题值）。 */
+  setColor(S.theme === 3 ? (S.fdark ? '#2d2d2d' : '#fdfcf9') : C.controlBg);
+  if (focused && S.theme === 3) setColor('#ffffff');
+  roundRect(x, y, x + w, y + h, S.theme === 3 ? 4 : 0, true);
+  setColor(focused ? C.accent : C.controlBorder);
+  roundRect(x + 0.5, y + 0.5, x + w - 0.5, y + h - 0.5, S.theme === 3 ? 4 : 0, false);
+
+  /* 3. 光标 → 视觉行/列 */
+  let caret = clamp(UI.caret[id] || 0, 0, txt.length);
+  let sedLine = 0, sedCol = 0;
+  {
+    // 把全局偏移换算成 (逻辑行, 行内列)
+    let acc = 0, li = 0;
+    for (; li < logical.length; li++) {
+      if (acc + logical[li].length < caret) { acc += logical[li].length + 1; }
+      else break;
+    }
+    if (li >= logical.length) { li = logical.length - 1; acc = txt.length - Math.max(0, logical[li].length); }
+    sedLine = li; sedCol = clamp(caret - acc, 0, logical[li].length);
+  }
+
+  /* 4. 滚动：保证光标所在视觉行可见 */
+  let caretVis = vis.length - 1;
+  for (let i = 0; i < vis.length; i++) {
+    const v = vis[i];
+    const end = v.colStart + v.text.length;
+    if (v.li === sedLine && sedCol >= v.colStart && (sedCol <= end || i === vis.length - 1)) { caretVis = i; break; }
+  }
+  const rowsVisible = Math.max(1, Math.floor(innerH / lineH));
+  if (UI.textareaScroll[id] === undefined) UI.textareaScroll[id] = 0;
+  let top = UI.textareaScroll[id];
+  if (caretVis < top) top = caretVis;
+  if (caretVis >= top + rowsVisible) top = caretVis - rowsVisible + 1;
+  top = clamp(top, 0, Math.max(0, vis.length - rowsVisible));
+  UI.textareaScroll[id] = top;
+
+  /* 5. 绘制可见行 + 光标 */
+  const oldClip = c.save ? null : null;
+  if (c.save) { c.save(); c.beginPath(); c.rect(x + 1, y + 1, w - 2, h - 2); c.clip(); }
+  let caretX = x + padX, caretY = y + padY;
+  for (let i = top; i < Math.min(vis.length, top + rowsVisible + 1); i++) {
+    const py = y + padY + (i - top) * lineH;
+    setColor(C.text);
+    text(x + padX, py, vis[i].text);
+    if (i === caretVis) {
+      const before = vis[i].text.slice(0, Math.max(0, sedCol - vis[i].colStart));
+      caretX = x + padX + c.measureText(before).width;
+      caretY = py;
+    }
+  }
+  if (focused && (G.time * 2) % 1 < 0.55) {
+    setColor(C.text);
+    fillRect(caretX, caretY, 1, lineH - 2);
+  }
+  if (c.restore) c.restore();
+
+  /* 6. 点击定位光标 */
+  if (mouseRectangle(x, y, w, h) && G.mbp[0]) {
+    UI.clickConsumed = true;
+    if (S.window === UI.inputWindow) focusText(id, txt);
+    const relY = clamp(G.mouse.y - y - padY, 0, innerH);
+    const rowIdx = clamp(top + Math.floor(relY / lineH), 0, vis.length - 1);
+    const v = vis[rowIdx];
+    // 在那一行里按 x 找最近字符边界
+    const relX = Math.max(0, G.mouse.x - x - padX);
+    let col = 0;
+    while (col < v.text.length && c.measureText(v.text.slice(0, col + 1)).width <= relX) col++;
+    // 换算回全局偏移
+    let off = 0;
+    for (let i = 0; i < v.li; i++) off += logical[i].length + 1;
+    UI.caret[id] = clamp(off + v.colStart + col, 0, txt.length);
+    caret = UI.caret[id];
+  }
+
+  /* 7. 键盘：Enter 换行、上下跨行（单行 textEdit 的键盘处理在 handleTextKeys 里，
+        这里只补它做不到的两件事）。 */
+  if (focused && S.window === UI.inputWindow) {
+    if (G.keysPressed['Enter'] && !G.ctrl) {
+      const cur = UI.textareaStr[id] || '';
+      UI.textareaStr[id] = cur.slice(0, caret) + '\n' + cur.slice(caret);
+      UI.caret[id] = caret + 1;
+      setMsg('');
+    }
+  }
+
+  return UI.textareaStr[id] === undefined ? '' : UI.textareaStr[id];
+}
+
 function inputBox(id, str, x, y, w, h) {
   /* 对照 draw_inputbox.gml:33 —— 非 Fluent 主题的输入框是三片式 sprite：
        spr_inputbox_n_left  (帧 = theme)
@@ -129,13 +295,20 @@ function inputBox(id, str, x, y, w, h) {
     drawSprite('spr_inputbox_' + sel + '_left', fr, x, y);
     drawSprite('spr_inputbox_' + sel + '_middle', fr, x + 3, y, (w - 6) / 3, 1);
     drawSprite('spr_inputbox_' + sel + '_right', fr, x + w - 3, y);
-    return textEdit(id, str, x + 6, y + 4, w - 12, h - 6);
+    /* 文字区内边距对照 draw_inputbox.gml:58 的
+           return draw_text_edit(i, val, xx + 3, yy + 3, w - 3, 21, 1, 0)
+       原版是 x+3 / y+3 / 宽 w-3。之前写成 x+6 / y+4 / w-12：
+         · 左内边距多 3px → 文字整体右移；
+         · 可用宽度少 9px → 长文本比原版更早被裁掉/滚动。
+       这里按 GML 改回。 */
+    return textEdit(id, str, x + 3, y + 3, w - 3, h - 6);
   }
   setColor(C.controlBg);
   roundRect(x, y, x + w, y + h, 4, true);
   setColor(UI.textFocus === id ? C.accent : C.controlBorder);
   roundRect(x + 0.5, y + 0.5, x + w - 0.5, y + h - 0.5, 4, false);
-  return textEdit(id, str, x + 6, y + 4, w - 12, h - 6);
+  // 同上：Fluent 分支的内边距也按 draw_inputbox.gml:58 用 x+3 / w-3
+  return textEdit(id, str, x + 3, y + 3, w - 3, h - 6);
 }
 
 
@@ -278,7 +451,16 @@ function drawCheckbox(x, y, state, label, locked, isSwitch) {
   const sw = S.theme === 3 && !!isSwitch;
   const xOff = sw ? 31 : 18;      // 开关宽 26（xx-1 .. xx+25），文字要右移
   const w = 13 + textWidth(label) + 8;
-  const hover = !locked && mouseRectangle(x, y, w, 13);
+  /* 【命中宽度与 GML 不同 —— 已按原版补上】
+     draw_checkbox.gml:20 的 tip 用 13+宽+8（视觉宽度），
+     但 :40 真正判断点击/悬停用的是 26+宽+8 —— 比外观宽出 13px，
+     允许点在方框左侧的空白处。我们原来用视觉宽度当命中区，
+     触摸时"点不中"的概率明显更高。
+     【菜单门控】GML 里所有可点控件都再乘 (!instance_exists(obj_menu))，
+     菜单展开时下层控件既不亮也不响应。我们之前只有按钮做了这件事，
+     于是对话框里弹出下拉菜单后，选择菜单项那一次"松开"
+     会被背后的复选框同时消费 —— 即"菜单点击穿透"。 */
+  const hover = !locked && !UI.menu && mouseRectangle(x, y, 26 + textWidth(label) + 8, 13);
   const c = G.ctx;
   /* 对照 draw_checkbox.gml:21-58 —— 分支条件是 `theme != 3` 对 `theme == 3`：
        非 Fluent（经典 0 / 复古 1 / 暗黑 2）→ spr_checkbox 位图（自带配色与浮雕）
@@ -420,7 +602,8 @@ function drawCheckbox(x, y, state, label, locked, isSwitch) {
 }
 function drawRadiobox(x, y, state, label, locked) {
   const w = 13 + textWidth(label) + 8;
-  const hover = !locked && mouseRectangle(x, y, w, 13);
+  // 菜单门控同 drawCheckbox（GML draw_radiobox.gml:27,32 的 !instance_exists(obj_menu)）
+  const hover = !locked && !UI.menu && mouseRectangle(x, y, w, 13);
   const c = G.ctx;
   /* 同样是 `theme != 3` 对 `theme == 3`（对照 draw_radiobox.gml:17/22）：
      经典/复古/暗黑走 spr_radiobox 位图，只有 Fluent 手绘。
@@ -474,8 +657,15 @@ function drawSwitch(x, y, state, label) {
      之前不分主题一律手绘，于是经典/复古/暗黑主题的开关是 Fluent 的胶囊造型，
      和旁边成对的复选框（方框）风格打架 —— 这就是主题混用。 */
   if (S.theme !== 3) {
-    const hover = mouseRectangle(x, y, label ? 32 + textWidth(label) : 26, 13);
-    const m = hover ? (G.mb[0] ? 1 : 1) : 0;
+    const hover = !UI.menu && mouseRectangle(x, y, label ? 32 + textWidth(label) : 26, 13);
+    /* 【按下帧必须与悬停帧不同】
+       对照 draw_checkbox.gml:40-45：
+           m = 鼠标在矩形内;  if (m) m += mouse_check_button(mb_left)
+       即悬停 m=1、悬停且按下 m=2，各有对应帧。
+       原来这里写成 `G.mb[0] ? 1 : 1` —— 两个分支都是 1，
+       m 永远只能是 0 或 1，「按下」那一帧根本取不到，
+       开关按下去没有任何视觉反馈；下面强调色的 m===2 分支也成了死代码。 */
+    const m = hover ? (G.mb[0] ? 2 : 1) : 0;
     const darkOff = S.fdark ? 8 : 0;
     if (!state) {
       drawSprite('spr_switch', m + darkOff, x, y);
@@ -632,7 +822,7 @@ function drawDragValue(id, x, y, value, step) {
 
   const over = mouseRectangle(x, y, w, h);
   if (over && G.mbp[0] && UI.drag.id !== id) {
-    UI.drag = { id, start: G.mouse.y, val: value, x, y, w, h };
+    UI.drag = { id, start: G.mouse.y, val: value, x, y, w, h, acc: 0 };
     dragAcquire(id);
   }
   /* 悬停在本框上（或正在拖它）时用上下双箭头 —— 与原版一致：
@@ -641,10 +831,27 @@ function drawDragValue(id, x, y, value, step) {
 
   if (UI.drag.id === id) {
     if (G.mb[0]) {
-      /* 用【相对按下点的绝对位移】算值：指针移到哪都有效，
-         不再要求它留在框内。向上拖 = 增大（与 ns-resize 的语义一致）。 */
-      const d = (UI.drag.start - G.mouse.y) * step;
-      value = UI.drag.val + Math.round(d * 4) / 4;
+      /* 【必须用累加器保留小数余数，不能每帧从基准值重算 ——
+         对照 draw_dragvalue.gml:34-38：
+             w_dragvalue += 0.1 * (mouse_yprev - mouse_y) / s
+             v += floor(w_dragvalue)
+             w_dragvalue -= floor(w_dragvalue)
+         原版把「这一步移动折算出的值」累加进 w_dragvalue，
+         取整部分并入 v，余数【留着】给下一帧继续攒。
+         我们之前每帧都用 `UI.drag.val + round(d*4)/4` 从按下时的基准值重算 ——
+         等于丢掉了余数：慢速小幅拖动（每帧只移动半格）时
+         d*4 的四舍五入永远回到原值，界面上数字一动不动，
+         用户感觉"这个控件拖了没反应"。
+         这影响所有用 drawDragValue 的数值框（音量/声道/音高/淡入淡出
+         的衰减与保持等 10 多个），所以必须按原版改。
+         注意 GML 用的是【逐帧位移】(mouse_yprev - mouse_y)，
+         我们也用逐帧位移（G.mouse.y - lastY），而不是相对起点的总位移。 */
+      const dy = (UI.drag.lastY === undefined) ? 0 : (UI.drag.lastY - G.mouse.y);
+      UI.drag.acc = (UI.drag.acc || 0) + 0.1 * dy / step;
+      UI.drag.val += floor(UI.drag.acc);
+      UI.drag.acc -= floor(UI.drag.acc);
+      value = UI.drag.val;
+      UI.drag.lastY = G.mouse.y;
     } else {
       UI.drag.id = -1;
       dragRelease(id);
@@ -722,14 +929,71 @@ function drawScrollbarGML(id, xx, yy, slotwh, s, ms, cantscroll, win) {
   const trackRect = id === 0
     ? mouseRectangle(xx, yy, 32 + mwh, 16)
     : mouseRectangle(xx, yy, 16, 32 + mwh);
+  /* 【登记滚动条的命中矩形】
+     touch.js 的 touchPointerDown 要用它判断"这次按下是不是落在滚动条上"：
+     落在滚动条上时【不能】启动长按定时器，否则按住拖动超过 450ms
+     会被 touchFireLongPress() 把 G.mb 清掉、SB.drag 归零，
+     拖动当场断掉（用户看到的就是"滚动条只能点不能拖"）。
+     这里每帧覆盖登记，滚动条位置变了也跟着更新。
+     用 id 区分横向/纵向，两个都记。 */
+  if (typeof UI !== 'undefined') {
+    if (!Array.isArray(UI.sbHit)) UI.sbHit = [];
+    const rect = id === 0
+      ? { x: xx, y: yy, w: 32 + mwh, h: 16 }
+      : { x: xx, y: yy, w: 16, h: 32 + mwh };
+    if (id === 0) UI.sbHit[0] = rect; else UI.sbHit[1] = rect;
+  }
   if (canInput && trackRect && G.mbp[0] && SB.drag[id] === -1) {
     SB.hold = id;
     if (win === 0) S.window = W_DRAG;
   }
 
+  /* 【触屏：按在滚动条任意位置，滑块直接跳到按下的地方】
+     —— 用户明确要求：「不要管用户是否按到了滑块，只要按了滚动条，
+        就把滑块移到按的位置」。
+     桌面版 GML 的语义是"点轨道 = 翻一页"（见下面那两段 mouseRectangle 翻页逻辑），
+     那套在鼠标上没问题，但在手指上是灾难：
+       · 触控目标只有 16px 宽，想按中滑块本身就难；
+       · 按偏了变成"翻页"，点一下只挪一页，要连点很多次才能到想去的位置；
+       · 而且手指按住不动时，翻页节流（20 帧 → 3 帧）会持续滚动，
+         用户根本没法精确停在某一列/层。
+     所以只要处在触摸模态，就把"按下"解释成"跳到此处"，
+     并把滑块中心对准手指位置（而不是让手指位置对应滑块顶部）——
+     后者在滑块很长时会有明显的偏移感。
+     按钮（两端的箭头）不参与这个行为，它们仍然按原版语义单击走一格。
+     非触摸模态保持原版行为不变。 */
+  if (TOUCH && TOUCH.mode === 1 && canInput && !locked && trackRect
+      && G.mbp[0] && SB.drag[id] === -1) {
+    const bwhNow = Math.max(10, (s / ms) * (s * slotwh));
+    if (id === 0) {
+      // 横向：扣掉两端 16px 的箭头按钮区，剩下的才是可跳转轨道
+      if (G.mouse.x > xx + 16 && G.mouse.x < xx + 16 + mwh) {
+        const localP = (G.mouse.x - xx - 16 - bwhNow / 2) / Math.max(1, mwh - bwhNow);
+        SB.val[id] = median(0, localP * (ms - s), ms - s);
+        SB.sel[id] = id; SB.drag[id] = id;
+        if (win === 0) S.window = W_DRAG;
+        SB.mprev[id] = G.mouse.x;
+        G.cursor = 'ew-resize';
+      }
+    } else {
+      if (G.mouse.y > yy + 16 && G.mouse.y < yy + 16 + mwh) {
+        const localP = (G.mouse.y - yy - 16 - bwhNow / 2) / Math.max(1, mwh - bwhNow);
+        SB.val[id] = median(0, localP * (ms - s), ms - s);
+        SB.sel[id] = id; SB.drag[id] = id;
+        if (win === 0) S.window = W_DRAG;
+        SB.mprev[id] = G.mouse.y;
+        G.cursor = 'ns-resize';
+      }
+    }
+    bpos = (SB.val[id] / ms) * (s * slotwh);
+  }
+
   if (id === 0) {
     /* ---------------- 横向 ---------------- */
-    if (SB.sel[id] === id && SB.drag[id] === -1 && canInput && !cantscroll && G.wheel) {
+    /* 对照 draw_scrollbar.gml:21：滚轮位移要乘 (!volume_scroll)。
+       指针停在主音量条上时 volume_scroll = 1，此处整体失效，
+       避免「一次滚轮同时改主音量和滚动视图」。 */
+    if (SB.sel[id] === id && SB.drag[id] === -1 && canInput && !cantscroll && G.wheel && !S.volume_scroll) {
       SB.val[id] += G.wheel;
       SB.val[id] = median(0, SB.val[id], ms - s);
       bpos = (SB.val[id] / ms) * (s * slotwh);
@@ -818,7 +1082,8 @@ function drawScrollbarGML(id, xx, yy, slotwh, s, ms, cantscroll, win) {
     drawSprite('spr_scrollbar_h_button_right', (theme * 4) + ind + (fdark && theme === 3 ? 4 : 0), xx + mwh + 16, yy);
   } else {
     /* ---------------- 纵向 ---------------- */
-    if (SB.sel[id] === id && SB.drag[id] === -1 && canInput && !cantscroll && G.wheel) {
+    /* 对照 draw_scrollbar.gml:160：同样要乘 (!volume_scroll) */
+    if (SB.sel[id] === id && SB.drag[id] === -1 && canInput && !cantscroll && G.wheel && !S.volume_scroll) {
       SB.val[id] += G.wheel;
       SB.val[id] = median(0, SB.val[id], ms - s);
       bpos = (SB.val[id] / ms) * (s * slotwh);
@@ -1061,6 +1326,14 @@ function parseMenuString(str) {
 
 function showMenu(name, x, y, str) {
   if (UI.menu) { UI.menu = null; }
+  /* 【打开菜单必须停止播放 —— 对照 show_menu_ext.gml:20】
+     原版：`menu_shown = argument0; if (!isplayer) playing = 0`。
+     我们原来只写菜单状态，完全不动播放，于是：
+       · 播放中打开顶部菜单，音乐继续走、进度条继续推进；
+       · 用户在菜单里点「导出为 schematic」时，实际位置已经和看到的不一致；
+       · 菜单是模态的（下层输入被屏蔽），但音乐还在跑，交互语义矛盾。
+     编辑器里没有 isplayer 这一套（我们只有编辑器），所以无条件停。 */
+  S.playing = 0;
   const menus = parseMenuString(str);
   UI.menu = { name, sx: x, sy: y, menus, show: menus.map((_, i) => i === 0), sel: -1, age: 0, ani: 0 };
   S.menu_open = name;
@@ -1096,10 +1369,21 @@ function drawMenu() {
   if (M.ani === undefined) M.ani = 0;
   if (M.ani < 1) M.ani = Math.min(1, M.ani + 0.1);
   M.age = (M.age || 0) + (G.dt || 0.016);
-  const openReady = (M.ani >= 1) && (M.age > 0.09);
+  /* 【只看 ani === 1，不要额外加时间门槛 —— 对照 menu_draw.gml:184】
+     原版松手判定是：
+         mouse_check_button_released(mb_left) && ani = 1
+     只有 ani 这一个条件。我们之前写成 `(M.ani >= 1) && (M.age > 0.09)`，
+     两个条件在低帧率下会不一致：ani 按帧数累加（10 帧到 1），
+     age 按真实时间累加（0.09 秒 ≈ 5~6 帧 @60fps，但掉帧时就不止 10 帧）。
+     结果就是某些帧率下「展开动画已完成但仍被判定为不可点击」，
+     菜单响应忽快忽慢。这里按 GML 只用 ani。 */
+  const openReady = (M.ani >= 1);
   const pos = M.menus.map(() => ({ x: 0, y: 0 }));
   pos[0].x = M.sx; pos[0].y = M.sy;
   let selMenu = -1, selItem = -1, noclick = 0;
+  /* 对照 menu_draw.gml 的全局 `sel`：悬停时就把当前项编号记下来，
+     松手时用它决定触发哪一项。这里用局部变量实现同样的时序。 */
+  let sel = -1;
 
   for (let m = 0; m < M.menus.length; m++) {
     if (!M.show[m]) continue;
@@ -1181,7 +1465,25 @@ function drawMenu() {
         G.mouse.y >= dy + iy - 5 && G.mouse.y < dy + iy - 5 + 22;
       if (issel) {
         for (let om = m + 1; om < M.menus.length; om++) M.show[om] = false;
-        if (it.sub > 0 || it.inactive) noclick = 1;
+        /* 【sel 必须在「悬停且菜单已展开」时就赋值，不能等到松手帧 ——
+           对照 menu_draw.gml:73-76：
+               if (issel) {
+                   ... close higher menus ...
+                   if (ani = 1) {
+                       sel = item_n[m, i]
+                       if (item_hasmenu[m, i] > 0 || item_inactive[m, i]) noclick = 1
+                   }
+                   selmenu = m; selitem = i
+               }
+           原版是【悬停即赋值】，且赋值发生在 `if (item_inactive) issel = 0` 之前；
+           随后才根据 inactive/hasmenu 清掉 issel。
+           我们之前把 sel 的赋值挪到了松手帧，于是「移到禁用项上松手」两边不同：
+           原版 sel 已经被设成那个禁用项的值（由 noclick 拦住后续动作），
+           我们则是 sel 保持旧值。这里按 GML 的时序改回来。 */
+        if (openReady) {
+          sel = i;
+          if (it.sub > 0 || it.inactive) noclick = 1;
+        }
         selMenu = m; selItem = i;
       }
       if (it.inactive) issel = false;
@@ -1239,7 +1541,17 @@ function drawMenu() {
 
   // 松开鼠标才处理点击（对照 menu_draw:184：`mouse_check_button_released(mb_left) && ani = 1 && !noclick`）
   if (G.mbr[0] && openReady && !noclick) {
-    const it = selItem >= 0 ? M.menus[selMenu].items[selItem] : null;
+    /* 用悬停时记下的 sel 定位条目 —— 与 GML 一致：
+       松手那一刻指针可能已经偏出项外（尤其是拖动后松手），
+       原版用的是【悬停期间最后一次命中】的编号，不是松手时的实时命中。 */
+    let it = null, useMenu = selMenu, useItem = selItem;
+    if (sel >= 0) {
+      // 优先按 GML 语义：sel 是"本级菜单内的项序号"，配合 selMenu 定位
+      if (selMenu >= 0 && M.menus[selMenu] && M.menus[selMenu].items[sel]) {
+        it = M.menus[selMenu].items[sel]; useItem = sel;
+      }
+    }
+    if (!it && selItem >= 0) it = M.menus[selMenu].items[selItem];
     const name = M.name;
     // 【顺序很重要】必须先把 menub（行号/目标索引）和菜单名取出来，
     // 因为 closeMenu() 会把 UI.menu 整个置空。

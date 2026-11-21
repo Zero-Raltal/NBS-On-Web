@@ -347,11 +347,25 @@ function calculateSize() {
       }
     }
   }
-  S.sch_exp_tempo = 0;
-  if (S.tempo > 10) S.sch_exp_tempo = 0;
-  if (S.tempo < 10) S.sch_exp_tempo = 0;
-  if (S.tempo < 7.5) S.sch_exp_tempo = 1;
-  if (S.tempo < 3.75) S.sch_exp_tempo = 2;
+  /* 【sch_exp_tempo 只在"打开窗口时"推算，不能每帧覆盖 —— 对照
+     calculate_size.gml:128-132 与 menu_click.gml:55】
+     原版流程：
+       菜单点击 → if (calculate_size()) window = w_schematic_export
+       calculate_size() 里按 S.tempo 推一次 sch_exp_tempo（0/1/2），
+       之后 draw_window_schematic_export.gml:133-135 的三个单选项
+       可以随意改写它，【没有别的地方再覆盖】。
+     schematic_length() 与导出循环都用这个值决定中继器数量与延时。
+     我们之前的问题是：drawSchematicExport() 每帧都调 calculateSize()，
+     于是用户在窗口里点「5 红石刻/秒」的下一帧就被这里按 S.tempo 冲掉 ——
+     单选项看着能点、实际不生效，导出的中继器数和长度全按自动档算。
+     解决办法：只在"打开窗口那一刻"推算，之后尊重用户选择。
+     用 S.sch_exp_tempo_ready 标记，打开窗口 / 关窗口时复位（见 setWindow 侧）。 */
+  if (!S.sch_exp_tempo_ready) {
+    S.sch_exp_tempo = 0;   // 0 = 10, 1 = 5, 2 = 2.5
+    if (S.tempo < 7.5) S.sch_exp_tempo = 1;
+    if (S.tempo < 3.75) S.sch_exp_tempo = 2;
+    S.sch_exp_tempo_ready = 1;
+  }
   return 1;
 }
 

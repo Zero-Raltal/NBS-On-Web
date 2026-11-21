@@ -339,6 +339,18 @@ function initInput() {
        早期有个缩放下限（TOUCH_MIN_SCALE），现已移除 —— 缩放完全跟随用户设置。
        但换算仍必须和绘制用同一个函数，否则会整体错位。 */
     const sc = (typeof touchEffScale === 'function') ? touchEffScale() : S.window_scale;
+    /* 【同时保存屏幕（client）坐标】
+       G.mouse.x/y 是【逻辑坐标】，已经被除以缩放值了。
+       有些逻辑需要"手指在屏幕上真实移动了多少像素"，比如首选项里的
+       页面缩放拖动（它要按屏幕位移算，而不是按缩放后的逻辑位移），
+       逻辑坐标用在那种地方会形成正反馈：
+         手指不动 → 改了缩放 → 逻辑坐标跟着变 → 算出的位移不为 0 → 再改缩放……
+       结果就是缩放在相邻档位之间来回跳、整屏反复重排（用户看到的是狂闪）。
+       sx/sy 保存换算前的 client 坐标，那里的变化只跟手指有关，与缩放无关。
+       这两个字段在 G.mouse 的初始值里一直存在（core.js:14），
+       但此前从未被赋值过，所以 scaleDrag 读到的永远是 -1。 */
+    G.mouse.sx = e.clientX - r.left;
+    G.mouse.sy = e.clientY - r.top;
     return [(e.clientX - r.left) / sc, (e.clientY - r.top) / sc];
   };
   /* 触摸结束后的短暂窗口里，浏览器会补发一次兼容鼠标事件。

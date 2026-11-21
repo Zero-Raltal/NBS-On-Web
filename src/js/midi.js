@@ -365,12 +365,17 @@ function applyMidiImport() {
       }
     }
   } else {
-    /* 有变速：取第一个事件的 BPM / 15 作为初始速度。
-       注意这里【不乘 precision】—— 原版 import_midi.gml:165 也是这样：
-       存进音符 pitch 的时候乘了 (precision+1)，但设定初始 tempo 时只除以 15。
-       因为 tempo 的单位是"每秒红石刻数"，而 BPM/15 才是 NBS 的换算。 */
+    /* 有变速：初始速度取【第一个】变速事件的 BPM，并按精度系数缩放。
+       对照 import_midi.gml:165：
+           tempo = (midi_tempo_changer_tempo[0] * (w_midi_precision + 1)) / 15
+       这里【必须乘 (precision + 1)】，与写进音符 pitch 的 `bpm * (precision+1)`
+       以及播放端 `floor(abs(pit)) / 15`（toggle_playing.gml:48）三者自洽。
+       早先这里只除以 15、没有乘精度系数，于是勾了「速度变化」再选 2x/4x/8x 时，
+       第一列到第一个变速方块生效之前的播放速度是原版的 1/(precision+1)
+       （默认 precision=1 时慢一倍），整首开头就是错的。
+       之前代码里的注释声称"原版也是这样、不乘 precision"，与源码正好相反，已更正。 */
     const firstBpm = m.tempoEvents[0].bpm;
-    S.tempo = Math.round((firstBpm / 15) * 100) / 100;
+    S.tempo = Math.round(((firstBpm * (precision + 1)) / 15) * 100) / 100;
   }
 
   S.song_name = S.midiName ? S.midiName.replace(/\.[^.]+$/, '') : '';

@@ -98,21 +98,46 @@ async function renderSongToWav(opts) {
   const mastervol = (S.mastervol === undefined) ? 1 : Math.max(0, Math.min(2, S.mastervol));
 
   // ---- 1. 收集音符 ----
+  /* 【必须按"静音层/独奏"过滤 —— 否则导出的音频和试听听感不一致】
+     用户报过的同类问题：界面上把某层静音了，试听确实听不到，
+     但导出的 WAV 里那一层还在。根因是这里只算了 gain（力度×层音量），
+     完全没读 layerlock / solostr。
+     原版 audio_export.gml:37 传的是 `exclude_locked_layers: !audio_exp_include_locked`，
+     而 audio_exp_include_locked 默认 0（control_create.gml:543），
+     也就是说【默认排除已静音的层】，并且导出窗口里给了"包括已静音的层"勾选框。
+     这里的判定与播放路径（editor.js 的 playColumnRange）保持完全一致：
+        solostr 非空 → 只有独奏列表里的层发声，其中被静音(lock=1)的仍不发声
+        solostr 为空 → layerlock[b] === 1 的层不发声
+     o.includeMuted 对应原版那个勾选框（true 时连静音层一起导出）。 */
+  const includeMuted = !!o.includeMuted;
+  const solostr = S.solostr || '';
   const notes = [];
   for (let a = 0; a <= S.enda; a++) {
     for (let b = 0; b <= S.endb; b++) {
       if (!gExists(a, b)) continue;
       const ins = INSTRUMENTS[gIns(a, b)];
       if (!ins || !ins.loaded || !ins.buffer) continue;
+      if (!includeMuted) {
+        if (solostr !== '') {
+          if (solostr.indexOf('|' + b + '|') < 0) continue;
+          else if (S.layerlock[b] === 1) continue;
+        } else if (b < S.endb2 && S.layerlock[b] === 1) {
+          continue;
+        }
+      }
       const vel = gVel(a, b);
       const lv = (S.layervol && S.layervol[b] !== undefined) ? S.layervol[b] : 100;
       const gain = (vel / 100) * (lv / 100) * mastervol;
       if (gain <= 0.0005) continue;                 // 静音层/零力度直接跳过
       const rate = 0.5 * Math.pow(2, (gKey(a, b) + (ins.key || 45) + (gPit(a, b) || 0) / 100 - 78) / 12);
+      /* 声像：同样遵守「关闭立体声」—— 对照 play_sound.gml:25-26，
+         realstereo 为真时强制按 100（中央）发声，忽略音符自身的 pan。
+         导出必须和试听一致，否则导出的文件声场和界面听到的不是一回事。 */
+      const panRaw = S.realstereo ? 100 : gPan(a, b);
       notes.push({
         start: Math.round(a / tempo * sr),
         rate, gain,
-        pan: Math.max(-1, Math.min(1, (gPan(a, b) - 100) / 100)),
+        pan: Math.max(-1, Math.min(1, (panRaw - 100) / 100)),
         ins,
       });
     }
@@ -170,7 +195,7 @@ async function renderSongToWav(opts) {
 
   const wav = await encodeWav(L, R, sr, (p) => {
     onProgress(0.88 + p * 0.12, '正在编码 WAV（' + Math.round(p * 100) + '%）...');
-  });
+  }, (o.channels === 1) ? 1 : 2);
   RENDER_CACHE.clear();   // 释放重采样缓存
   onProgress(1, '完成');
   return wav;
@@ -184,11 +209,13 @@ function yieldToUI() {
   });
 }
 
-/* 左右声道 → 16 位 PCM WAV。分段编码，长歌也不会冻住界面。 */
-async function encodeWav(L, R, sr, onProgress) {
+/* 左右声道 → 16 位 PCM WAV。分段编码，长歌也不会冻住界面。
+   对照 draw_window_audio_export.gml 的 audio_exp_channels：1 = 单声道、2 = 立体声。
+   单声道时把左右声道取平均，避免声像偏到某一侧。 */
+async function encodeWav(L, R, sr, onProgress, numCh) {
   const len = Math.max(L.length, R.length);
-  const numCh = 2;
-  const blockAlign = numCh * 2;
+  const ch = (numCh === 1) ? 1 : 2;
+  const blockAlign = ch * 2;
   const dataSize = len * blockAlign;
   const ab = new ArrayBuffer(44 + dataSize);
   const dv = new DataView(ab);
@@ -200,7 +227,7 @@ async function encodeWav(L, R, sr, onProgress) {
   wstr(12, 'fmt ');
   dv.setUint32(16, 16, true);
   dv.setUint16(20, 1, true);          // PCM
-  dv.setUint16(22, numCh, true);
+  dv.setUint16(22, ch, true);
   dv.setUint32(24, sr, true);
   dv.setUint32(28, sr * blockAlign, true);
   dv.setUint16(32, blockAlign, true);
@@ -220,9 +247,16 @@ async function encodeWav(L, R, sr, onProgress) {
       if (r > 0.95 || r < -0.95) r = Math.tanh(r);
       l = Math.max(-1, Math.min(1, l));
       r = Math.max(-1, Math.min(1, r));
-      dv.setInt16(off, l < 0 ? l * 0x8000 : l * 0x7fff, true);
-      dv.setInt16(off + 2, r < 0 ? r * 0x8000 : r * 0x7fff, true);
-      off += 4;
+      if (ch === 1) {
+        /* 单声道：左右取平均。这样无论声像如何，导出的波形都是居中单声道。 */
+        const m = (l + r) / 2;
+        dv.setInt16(off, m < 0 ? m * 0x8000 : m * 0x7fff, true);
+        off += 2;
+      } else {
+        dv.setInt16(off, l < 0 ? l * 0x8000 : l * 0x7fff, true);
+        dv.setInt16(off + 2, r < 0 ? r * 0x8000 : r * 0x7fff, true);
+        off += 4;
+      }
     }
     if (onProgress) onProgress(end / len);
     await yieldToUI();
@@ -233,14 +267,22 @@ async function encodeWav(L, R, sr, onProgress) {
 /* 供对话框调用：渲染并下载。
    进度写进 S.render_progress，由 drawMsg 持续显示 —— 长歌渲染要几十秒，
    只弹一句「请稍候」用户会以为没反应。 */
-async function exportSongAudio(name) {
+async function exportSongAudio(name, opts) {
   const base = (name || S.song_name || S.filename || 'song').replace(/\.[^.]+$/, '');
+  /* opts: { sampleRate, channels, includeMuted } —— 来自音频导出选项窗口，
+     缺省时退回 S 里的设置，再退回默认值（与 control_create.gml:540-543 一致）。 */
+  const o = Object.assign({}, opts || {});
+  if (o.sampleRate === undefined) o.sampleRate = S.audio_exp_sample_rate || S.render_samplerate || 44100;
+  if (o.channels === undefined) o.channels = S.audio_exp_channels === 1 ? 1 : 2;
+  if (o.includeMuted === undefined) o.includeMuted = S.audio_exp_include_locked === 1;
   S.render_progress = 0;
   S.render_msg = '准备导出音频...';
   const t0 = performance.now();
   try {
     const wav = await renderSongToWav({
-      sampleRate: S.render_samplerate || 44100,
+      sampleRate: o.sampleRate,
+      channels: o.channels,
+      includeMuted: o.includeMuted,
       onProgress: (p, m) => {
         S.render_progress = p;
         if (m) { S.render_msg = m; setMsg(m); }

@@ -50,7 +50,10 @@ const ATLAS_SETS = [
   //   draw_sprite(spr_schematic_exp, sch_exp_layout, x1+15, y1+56)
   // 和 draw_window_datapack_export.gml:93/182 的 spr_datapack_exp）。
   // 之前漏了这两套，导出弹窗里本该有的示意图就不显示了。
-  'spr_schematic_exp', 'spr_datapack_exp',
+  // spr_schematic_br 是「导出分支」窗口设计页的示意图
+  // （draw_window_branch_export.gml:103 的 draw_sprite(spr_schematic_br, 0, ...)），
+  // 尺寸与 spr_schematic_exp 相同（520x150），之前也没有收录。
+  'spr_schematic_exp', 'spr_datapack_exp', 'spr_schematic_br',
   // 高清（4x）素材，开启 hires 时优先使用
   'spr_icons_f_hires', 'spr_icons_d_hires', 'spr_icons_col_hires', 'spr_layericons_f_hires',
   'spr_macroicons_hires', 'spr_piano_hires', 'spr_button_arrow_hires', 'spr_bigicons_f_hires',

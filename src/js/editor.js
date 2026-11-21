@@ -6,6 +6,13 @@
 'use strict';
 
 /* 窗口 ID（对应 macros.gml 的 w_*） */
+/* 全屏"返回"按钮的几何（对照 control_draw.gml 右下角返回按钮）。
+   【必须定义在文件顶部】editorFrame 要在 handleGridInput 之前用它们拦按下，
+   而 editorFrame 在文件前部；放后面会撞上 const 的暂时性死区（ReferenceError）。 */
+const FS_EXIT_SIZE = 48;      // 按钮视觉尺寸
+const FS_EXIT_MARGIN = 10;    // 距屏幕右下角的边距
+const FS_EXIT_PAD = 4;        // 命中区在视觉尺寸外再扩的容差
+
 const W_MENU = 100, W_RELEASE = 29, W_INSBOX = 42, W_DRAGVOL = 27, W_DRAGSTEREO = 41,
   W_DRAGSECTION_END = 26, W_DRAGSECTION_START = 25, W_DRAGSELECTION = 24, W_DRAGMARKER = 23,
   W_DRAGTEMPO = 22, W_SONGINFOEDIT = 11, W_SONGINFO = 10, W_PROPERTIES = 7, W_STATS = 6,
@@ -19,6 +26,13 @@ const W_MENU = 100, W_RELEASE = 29, W_INSBOX = 42, W_DRAGVOL = 27, W_DRAGSTEREO 
   // 30 在旧代码里被「兼容性」窗口占了，这次把兼容性挪到 31，
   // 两个导出窗口用回原版 ID（这样和 GML 的窗口编号保持一致）。
   W_SCHEMATIC_EXPORT = 14, W_DATAPACK_EXPORT = 30;
+
+/* 音频导出选项窗口（W_AUDIOEXPORT = 45，45 这个原窗口编号未被占用）。
+   对照 draw_window_audio_export.gml：原版会弹出一个窗口，让用户选
+   输出格式 / 采样率 / 声道 / 是否包括已静音的层。
+   原版没有为它分配独立的 window 状态值（窗口由菜单流程直接绘制），
+   这里给一个独立状态，以便走统一的模态与遮罩机制。 */
+const W_AUDIOEXPORT = 45;
 
 /* 这些 window 值只是内部拖拽/瞬时状态，不是真正的对话框：
    不能画灰色遮罩，也不能屏蔽下层交互（对照 GML：draw_windows 只画已知窗口） */
@@ -43,6 +57,15 @@ function editorInit() {
   S.trem_spacing = 1; S.stereo_width = 50; S.stereo_reverse = 0;
   S.port_cent = 0; S.porta_reverse = 0;
   S.setvel = 100; S.setpan = 0; S.setpit = 0; S.percentvel = 0;
+  /* 【Tremolo 模式与参数，对照 control_create.gml:548-552 / reset.gml:136-140】
+     tremolotype: 0 = 无音量变化，1 = 淡入，2 = 淡出
+     fade_auto:   1 = 自动音量（由音符长度决定），0 = 手动音量（用 leg_dec/leg_sus）
+     leg_dec / leg_sus: 手动模式下的衰减与延长（触发-延长-间隔）
+     这些原先没有初值，draw_window_macro_tremolo 里的单选框读不到状态，
+     会一直停在 undefined 上。 */
+  S.tremolotype = 0; S.leg_dec = 20; S.leg_sus = 20;
+  /* 「设定音高」的加法模式开关，对照 control_create.gml（addpitch = 0） */
+  S.addpitch = 0;
   S.arp_pattern = '0|4|7'; S.stag_pattern = '0|1';
   S.fade_auto = 1;
   S.selected_layers = [];
@@ -159,6 +182,16 @@ function editorFrame(dt) {
   UI.popup = null;
   computeLayout();
 
+  /* volume_scroll —— 对照 control_create.gml:163 与 control_draw.gml:1939-1945：
+     指针停在【主音量条】上时置 1，使两条滚动条的滚轮分支整体失效
+     （draw_scrollbar.gml:21 / :160 里乘 (!volume_scroll)），滚轮只改主音量。
+     之前没有这个标志，于是「在主音量条上滚一下」会同时改音量和滚动视图 ——
+     用户很难察觉自己把视图滚走了。
+     音量条的矩形是在 drawTopBar 里算出来的，而 drawTopBar 画在滚动条【之后】，
+     所以这里用上一帧缓存的矩形来判定（布局逐帧稳定，1 帧滞后不可感知）。 */
+  const volbr = S.volbar_rect;
+  S.volume_scroll = (volbr && mouseRectangle(volbr.x, volbr.y, volbr.w, volbr.h)) ? 1 : 0;
+
   const rw = S.rw, rh = S.rh;
   const x1 = S.x1, y1 = S.y1, gx = S.gx, gy = S.gy;
   const totalcols = S.totalcols, totalrows = S.totalrows;
@@ -216,8 +249,53 @@ function editorFrame(dt) {
   // 关闭菜单/消息框的那一次按下要被"吞掉"，直到松开（含松开那一帧），避免穿透到下层控件
   /* 竖屏抽屉打开时同样屏蔽下层：抽屉是浮层，底下的网格仍画在那里，
      不拦的话点抽屉里的按钮会顺手在网格上落一个音符。 */
+  /* 【拖拽锁定：按下之后到松手之前，其它控件一律不响应】
+     用户报的一连串"乱套"都出自同一个缺口：一次按住拖动，只有"起点"被正确消费，
+     "终点"却仍然是一次全新的按下/松开，于是沿途经过的控件把它当成独立点击。
+     具体表现：
+       · 画布上按住左键选区，拖到钢琴上 → 钢琴收到 mbr，发出声音；
+       · 拖到顶部工具栏松手 → 松手位置下面的按钮被触发；
+       · 拖速度滑块时松手位置有按钮 → 那个按钮被触发（滑块拖动本身没问题，
+         问题在于松手那一帧 mbr 没有被吞掉）；
+       · 画布拖选区经过速度滑块 → 滑块收到 mbr 开始改速，和选区同时进行。
+     【注意：dragHeld 不参与 blocked】
+       第一版把 dragHeld 直接并进了 blocked，结果把正在拖的那个控件自己也屏蔽了：
+       blocked 会清零 G.mb/G.mbp/G.mbr，而 drawEditor 里的滚动条、drawWindows
+       里的滑块都在 blocked 之后才绘制 —— 它们拿到的全是 false，
+       于是"按下滚动条的那一帧之后，后面每一帧都收不到按住状态"，
+       表现就是【滚动条只能点一下、不能拖】。
+       拖拽期间需要被屏蔽的是"别的控件"，不是发起拖拽的那个控件本身。
+       所以 dragHeld 单独列出来，只用于下面 drawWindows() 那一处的前置清零
+       （窗口控件 = 由 drawWindows 绘制的那些），画布/滚动条/piano 照常收输入。 */
+  /* 【拖拽判据必须不依赖 G.mb[0]】
+     前一版写成 `G.mb[0] && (拖拽状态…)`，在真机上手就失效：
+     触屏的 touchFireLongPress() 会在按住约 450ms 时把 G.mb[0] 置 false
+     （长按→右键的实现，见 touch.js），于是"手指还按着、G.mb[0] 已是 false"，
+     整个 dragHeld 变成 false —— 钢琴、顶栏按钮、速度滑块全部解除屏蔽，
+     结果就是"拖到钢琴上能按响""松手触发按钮""一边选区一边改速度"全部复发。
+     而 SB.drag / S.select / S.window=W_DRAG* 这些【拖拽状态变量】仍然准确，
+     它们不受长按逻辑影响，所以判据只用状态变量。
+     清除时机由各控件自己在松手帧负责，不需要在这里判按钮。 */
+  const dragHeld = (
+    S.window === W_DRAGSELECTION || S.window === W_DRAGMARKER ||
+    S.window === W_DRAGSECTION_START || S.window === W_DRAGSECTION_END ||
+    S.window === W_DRAGVOL || S.window === W_DRAGSTEREO || S.window === W_DRAGTEMPO ||
+    S.window === W_DRAG || S.select > 0 ||
+    /* 【速度滑块拖动 / 刚松手那一帧】
+       用户报："在速度滑块上面按住拖动的时候，只要松开鼠标的位置有按钮，
+       一松开鼠标就会触发。"
+       速度滑块不像滚动条那样有 S.window 状态变量，它靠 S.tempoDrag。
+       而松手那一帧末尾 `if (!G.mb[0]) S.tempoDrag = null` 会【当场清掉】它，
+       但同一帧里后面的 drawWindows / drawIcon 才刚要读 G.mbr[0] 做点击判定 ——
+       于是"拖完滑块松手 → 松手位置下面的按钮被触发"。
+       UI.tempoDragged 在按下和每一帧拖动时置 1，由 editorFrame 在
+       【按键真正抬起后的下一帧】清掉（见函数末尾），
+       保证松手那一帧也算在"拖拽中"，按钮看不到这次松开。 */
+    !!UI.tempoDragged
+  );
   const blocked = isDialogWindow(S.window) || !!UI.menu || !!UI.modal || !!UI.swallowPress ||
     (typeof drawerOpen === 'function' && drawerOpen());
+  UI.dragHeld = dragHeld;
   /* 保存【清零前】的原始输入快照。
      抽屉是浮层，它在 blocked 生效之后才绘制，必须能看到真实输入，
      所以除了 rawMbr / rawMbp，rawMb 也要存（钢琴的按下靠它判断）。 */
@@ -228,6 +306,7 @@ function editorFrame(dt) {
   }
   S.cursmarker = 0;
   handleGlobalKeys();
+  handleCtrlWheelZoom();
   handlePlayback(dt);
   /* 【抽屉打开时彻底跳过下层输入】
      blocked 只是把 G.mb/G.mbp/G.mbr 清零，但 handleTimelineInput /
@@ -237,9 +316,54 @@ function editorFrame(dt) {
        · handlePianoInput    会读键盘、并且 G.cursor 判定用的是 mouseRectangle
      于是抽屉打开时手指在琴键上滑动，仍然会喂给底下的画布逻辑 ——
      表现为「琴键上滑动会穿透到画布」。清零按钮状态挡不住这一半。
-     所以抽屉打开时直接不进这几个 handler，从根上断掉。 */
+     所以抽屉打开时直接不进这几个 handler，从根上断掉。
+
+     【但「拖拽进行中」必须继续喂输入】
+     dragHeld 也会让 blocked 为真（见上面的说明），如果把这条路径也一并
+     跳过，正在进行的拖动就会立刻断掉（选区不动了、滑块不跟手了）。
+     所以这里分两种情况：
+       · dragHeld  → 用【清零前】的原始快照恢复 G.mb/mbp/mbr 再跑这三个 handler，
+                     让拖拽继续，但同时【已经】通过 blocked 屏蔽了所有窗口控件
+                     （drawWindows 拿到的是清零后的值）；
+       · 其它      → 照旧跳过，防止穿透。 */
   const drawerIsOpen = (typeof drawerOpen === 'function' && drawerOpen());
-  if (!drawerIsOpen) {
+  /* 【全屏退出按钮：按下帧就要在画布逻辑之前拦住】
+     用户报："退出全屏的按钮会穿透，点击之后虽然可以退出全屏，
+     但也会放置出一个音符。"
+     editorFrame 的顺序是 handleGridInput(先) → drawEditor(后)，
+     按钮在 drawEditor 里，等它处理时画布已经把这次松开当落音符用掉了。
+     所以在这里（两个 handler 之前）用按钮的几何矩形直接判一次，
+     不依赖 drawEditor 上一帧算出的 hover —— 避免"鼠标瞬移过去点"时慢一帧。
+     只吃按下：按下不落音符，松手时按钮自己那条 `hov && G.mbr[0]` 照常退出全屏。 */
+  if (S.fullscreen && G.mbp[0]) {
+    const fsz = FS_EXIT_SIZE, fm = FS_EXIT_MARGIN, fp = FS_EXIT_PAD;
+    const fx = S.rw - fsz - fm, fy = S.rh - fsz - fm;
+    if (mouseRectangle(fx - fp, fy - fp, fsz + fp * 2, fsz + fp * 2)) {
+      G.mbp[0] = false;
+      S.clickinarea = 0;
+      S.dontplace = 1;
+    }
+  }
+  if (dragHeld || !drawerIsOpen) {
+    /* 【拖拽进行中要用原始输入喂给 canvas 层，且必须一直喂到 drawEditor 结束】
+       为什么把两个分支合并到这里、并且不清零：
+       滚动条、拖动条、选区拖拽这些控件都是【在 drawEditor 里绘制并处理输入】
+       的，不是 drawWindows。早先写成：
+           if (dragHeld) {
+             G.mb = rawMb.slice();            // 恢复
+             handleTimeline/Grid/PianoInput(); // 跑 handler
+             G.mb = [false,false,false];       // ← 又清零
+           }
+           drawEditor(dt);                     // ← 滚动条拿到的是清零后的 false
+       结果就是：按下滚动条那一帧能进拖动（那时还在 blocked 分支之外），
+       但【之后每一帧滚动条都收不到「按住」】，于是它以为用户松手了，
+       立刻执行 SB.drag = -1 —— 用户看到的就是"滚动条只能点一下，拖不动"。
+       现在不再清零，让 drawEditor 也能看到真实输入；
+       真正需要屏蔽的是 drawWindows（窗口控件），那一处单独处理（见下面 needMask）。 */
+    if (dragHeld) {
+      G.mb = rawMb.slice(); G.mbp = rawMbp.slice(); G.mbr = rawMbr.slice();
+    }
+    handleDragAutoscroll();
     handleTimelineInput();
     handleGridInput();
     handlePianoInput();
@@ -260,12 +384,22 @@ function editorFrame(dt) {
      这里用同样的办法：菜单打开期间，先把 G.mb/G.mbp/G.mbr 清零再画窗口，
      画完再恢复给 drawMenu 用 —— 窗口看不到这次输入，菜单照常响应。 */
   const menuOpen = !!UI.menu;
-  if (menuOpen) {
+  /* 【拖拽进行中：窗口控件看不到这次输入】
+     这就是用户报的那一串"拖拽穿透"的正解：
+     画布上按住拖动时，鼠标可能掠过速度滑块、钢琴、工具栏按钮，
+     这些控件如果拿到 G.mb/G.mbr，就会把"掠过"当成"点击"。
+     拖拽期间它们在语义上都不该响应 —— 一次按住只能有一个操作对象。
+     但【只屏蔽 drawWindows 这一个入口】：
+       · 画布/滚动条由 drawEditor 绘制，它们可能是拖拽的发起者，必须继续收输入；
+       · piano 由 handlePianoInput 处理，那边另有 dragHeld 判断。
+     清零发生在 drawWindows 之前、drawMenu 之后恢复，所以对菜单无影响。 */
+  const needMask = menuOpen || UI.dragHeld;
+  if (needMask) {
     G.mb = [false, false, false]; G.mbp = [false, false, false];
     G.mbr = [false, false, false]; G.wheel = 0;
   }
   drawWindows();
-  if (menuOpen) {
+  if (needMask) {
     G.mb = rawMb; G.mbp = rawMbp; G.mbr = rawMbr; G.wheel = rawWheel;
   }
   /* 拖控件锁的兜底释放。
@@ -283,8 +417,12 @@ function editorFrame(dt) {
   drawMessageBox();
   drawPopup();
   if (G.mbp[0] && UI.textFocus >= 0 && !UI.clickConsumed) blurText();
-  // 帧末才解除"吞点击"：松开那一帧仍算被吞
+  /* 帧末才解除"吞点击"：松开那一帧仍算被吞 */
   if (UI.swallowPress && !G.mb[0] && !G.mbp[0] && !G.mbr[0]) UI.swallowPress = false;
+  /* 速度滑块的"刚拖动过"标记：必须在【按键真正抬起、且没有新的按下/松开】
+     的帧末才清。松手那一帧 mbr 还是 true，此时清掉就白做了
+     （后面的 drawWindows / drawIcon 还要用 dragHeld 屏蔽点击）。 */
+  if (UI.tempoDragged && !G.mb[0] && !G.mbp[0] && !G.mbr[0]) UI.tempoDragged = false;
   G.hiddenInput.style.cursor = G.cursor;
   G.canvas.style.cursor = G.cursor;
 }
@@ -852,10 +990,92 @@ function togglePlaying(cols) {
 }
 
 /* ---------------------------------------------------------------- 网格交互 */
+/* ============================================================================
+ * 拖拽到画布边缘时的自动滚屏 —— 完整对照 control_draw.gml:1116-1153
+ *
+ * 【为什么必须补】
+ * 原版在「拖选 / 拖选区 / 拖区间端点 / 正在框选」时，只要鼠标越过网格边缘，
+ * 视图就会持续滚动，选区锚点同步补偿，因此可以【一次拖过整首歌】。
+ * 我们之前完全没有这段，选区只在可见范围内生效，超过一屏就选不到 ——
+ * 这是原版最基本的编辑手感之一。
+ *
+ * 【速度为什么要"累加 + ceil"而不是按距离线性】
+ *   if (refreshrate >= 2) dragincxr += 0.025 else dragincxr += 0.1
+ *   dragincxr = min(dragincxr, 4)
+ *   starta += ceil(dragincxr)
+ * 每帧只加一点点、再取 ceil，于是「刚越界时慢慢挪、越久越快」，
+ * 上限 4 格/帧。指针回到网格内就把累加量清零，下次再越界重新从慢速起步。
+ *
+ * 【选区的补偿】
+ *   if (select > 0) {
+ *       select_pressx += 32 * (a - starta)
+ *       select_pressy += 32 * (b - startb)
+ *   }
+ * 视图平移了多少，锚点就反向平移多少（像素单位，所以乘 32），
+ * 这样"起点"在歌曲坐标系里保持不动 —— 否则一滚动选区起点就跟着跑。
+ *
+ * 【为什么不夹 enda/endb】
+ *   GML 夹的是 `median(0, starta, enda)` / `median(0, startb, endb)`，
+ *   也就是【可以用拖拽把视图推到歌曲末尾之后】。我们沿用同一夹法。
+ * ========================================================================== */
+function handleDragAutoscroll() {
+  const dragging = (S.window === W_DRAGSELECTION || S.window === W_DRAGSECTION_START ||
+    S.window === W_DRAGSECTION_END || S.select > 0);
+  if (!dragging) {
+    /* 不在拖拽状态时把四个累加量归零，下次越界从慢速重新起步。
+       （GML 是靠 else 分支每条各自清零，效果等价。） */
+    S.dragincxr = 0; S.dragincxl = 0; S.dragincyd = 0; S.dragincyu = 0;
+    return;
+  }
+  const gx = S.gx, gy = S.gy;
+  const totalcols = S.totalcols, totalrows = S.totalrows;
+  /* 对照 GML 的 refreshrate >= 2 分支：高清/高刷屏上加速要更缓，
+     否则一越界就瞬间飞出去。S.hires 对应原版的 hires 开关。 */
+  const step = S.hires ? 0.025 : 0.1;
+  const a0 = S.starta, b0 = S.startb;
+
+  /* 右侧：mouse_x > x1 + 2 + 32 * totalcols - 32 */
+  if (G.mouse.x > gx + 32 * totalcols - 32) {
+    S.dragincxr = Math.min((S.dragincxr || 0) + step, 4);
+    S.starta += Math.ceil(S.dragincxr);
+  } else S.dragincxr = 0;
+
+  /* 左侧：mouse_x < x1 + 32 */
+  if (G.mouse.x < gx + 32) {
+    S.dragincxl = Math.min((S.dragincxl || 0) + step, 4);
+    S.starta -= Math.ceil(S.dragincxl);
+  } else S.dragincxl = 0;
+
+  /* 下侧：mouse_y > y1 + 34 + totalrows * 32（gy 已经是 y1+34，故直接用 gy） */
+  if (G.mouse.y > gy + totalrows * 32) {
+    S.dragincyd = Math.min((S.dragincyd || 0) + step, 4);
+    S.startb += Math.ceil(S.dragincyd);
+  } else S.dragincyd = 0;
+
+  /* 上侧：mouse_y < y1 + 34 + 32 */
+  if (G.mouse.y < gy + 32) {
+    S.dragincyu = Math.min((S.dragincyu || 0) + step, 4);
+    S.startb -= Math.ceil(S.dragincyu);
+  } else S.dragincyu = 0;
+
+  S.starta = median(0, S.starta, Math.max(0, S.enda));
+  S.startb = median(0, S.startb, Math.max(0, S.endb));
+
+  /* 框选/拖动选区时，锚点反向补偿（像素） */
+  if (S.select > 0) {
+    if (S.select_pressx !== -1) S.select_pressx += 32 * (a0 - S.starta);
+    if (S.select_pressy !== -1) S.select_pressy += 32 * (b0 - S.startb);
+  }
+  /* 同步滚动条状态 —— 否则拖块位置与实际视口不符 */
+  SB.val[0] = S.starta;
+  SB.val[1] = S.startb;
+}
+
 function handleGridInput() {
   const gx = S.gx, gy = S.gy;
   const totalcols = S.totalcols, totalrows = S.totalrows;
-  const sela = S.sela, selb = S.selb;
+  /* sela/selb 在"拖出边缘继续框选"时会被夹回网格内，所以必须 let */
+  let sela = S.sela, selb = S.selb;
 
   if (S.window === W_DRAGSELECTION) {
     // 对照 control_draw.gml:516-533：
@@ -863,8 +1083,20 @@ function handleGridInput() {
     //   selection_y = startb + floor((mouse_y - (y1+34)) / 32) - select_pressb
     // 这里 x1+2 = gx、y1+34 = gy，用的都是【未经取整】的 starta/startb，
     // 只对鼠标偏移做 floor —— 之前两边都 floor 过，逐页滚动剩小数时会差一格。
-    const nx = Math.max(0, S.starta + floor((G.mouse.x - gx) / 32) - S.select_pressa);
-    const ny = Math.max(0, S.startb + floor((G.mouse.y - gy) / 32) - S.select_pressb);
+    /* 【必须把结果夹在网格范围内】
+       原版 GML 依赖"鼠标出不了游戏窗口"这个前提，drag 时算出来最多溢出一两格。
+       网页端鼠标可以随便拖到钢琴、工具栏、状态栏上，于是：
+         · 往下拖到钢琴区 → floor((mouseY - gy)/32) 变成很大的正数，
+           选区被甩到几十层之外，selectionExpandLayers() 再把层号一路撑开，
+           原本的音符就被挤出有效范围、看起来像"被删掉了"；
+         · 往上拖到工具栏 → 负偏移，虽然取了 Math.max(0,...) 但横向没夹，
+           同样会把选区推到不存在的位置。
+       夹的范围：列 0..enda、层 0..endb2（endb2 是已分配的层数，
+       这样拖到最下面也不会凭空扩张层数）。 */
+    const maxA = Math.max(0, S.enda);
+    const maxB = Math.max(0, S.endb2 - 1);
+    const nx = clamp(S.starta + floor((G.mouse.x - gx) / 32) - S.select_pressa, 0, maxA);
+    const ny = clamp(S.startb + floor((G.mouse.y - gy) / 32) - S.select_pressb, 0, maxB);
     SEL.x = floor(nx); SEL.y = floor(ny);
     G.cursor = 'move';
     if (!G.mb[0]) {
@@ -881,16 +1113,40 @@ function handleGridInput() {
     return;
   }
   if (S.select > 0) {
+    /* 【拖选结束时，终点必须落在网格内】
+       用户报："在画布上按住左键选区，拖到钢琴上松手 → 音符少了一半"。
+       原因是拖到网格外面之后 S.selbx / S.selby 会变成 -1
+       （"指针不在任何格子上"的哨兵值），而松手那一帧直接拿它当终点：
+           selectionAdd(select_pressa, select_pressb, -1, -1)
+       于是矩形被压成左上角一格（Math.min(2,-1) = -1 → clip 成 0，
+       median(0, -1, enda) = 0），原本覆盖 6 个音符的拖选只选中了 1 个 ——
+       selectionAdd 会按新矩形重建内容，范围外的音符就"消失"了。
+       正确处理：终点出界时，退回【最后一个有效格子】，
+       也就是"拖到边界外 = 拖到边界"，这是所有选区工具的通行行为。
+
+       注意 select_lastA/B 必须在读之前先更新（放在本块开头），
+       否则读到的是上一帧的值，回退会慢一格；
+       若一次都没进过网格（起点就在外面），才退回起始点。 */
+    if (S.selbx >= 0 && S.selby >= 0) { S.select_lastA = S.selbx; S.select_lastB = S.selby; }
+    const outOfGrid = (S.selbx < 0 || S.selby < 0);
+    const endA = outOfGrid
+      ? (typeof S.select_lastA === 'number' ? S.select_lastA : S.select_pressa)
+      : S.selbx;
+    const endB = outOfGrid
+      ? (typeof S.select_lastB === 'number' ? S.select_lastB : S.select_pressb)
+      : S.selby;
     // 拖选
     if (S.select === 1 && !G.mb[0]) {
-      selectionAdd(S.select_pressa, S.select_pressb, S.selbx, S.selby, G.alt, false);
+      selectionAdd(S.select_pressa, S.select_pressb, endA, endB, G.alt, false);
       S.window = W_RELEASE; S.select = 0;
       S.select_pressx = -1; S.select_pressy = -1; S.select_pressa = -1; S.select_pressb = -1;
+      S.select_lastA = undefined; S.select_lastB = undefined;
     }
     if (S.select === 2 && !G.mb[2]) {
-      selectionRemove(S.select_pressa, S.select_pressb, S.selbx, S.selby, false, false);
+      selectionRemove(S.select_pressa, S.select_pressb, endA, endB, false, false);
       S.window = W_RELEASE; S.select = 0;
       S.select_pressx = -1; S.select_pressy = -1; S.select_pressa = -1; S.select_pressb = -1;
+      S.select_lastA = undefined; S.select_lastB = undefined;
     }
     // 同上：拖拽选区时也用普通箭头，不显示十字光标
     if (sela > -1 && selb > -1) G.cursor = 'default';
@@ -914,10 +1170,46 @@ function handleGridInput() {
     }
   }
   if (S.window !== 0 || S.playing || UI.textFocus >= 0) return;
+  /* 【指针移出网格后不能直接 return —— 正在框选/拖动时必须继续跑】
+     对照 control_draw.gml:211-217：
+         if ((window = 0 || select > 0) && playing = 0 && !isplayer) {
+             if (mouse_rectangle(网格) || select > 0) {
+                 sela = floor(...); selb = floor(...); curs = cr_handpoint
+             }
+     原版的 sela/selb 在 `select > 0` 时【即使指针已在网格外也照常计算】，
+     并继续往下走框选逻辑；配合 :1116-1153 的自动滚屏，才能"拖出边缘
+     → 视图滚动 → 选区继续扩张"。
+     我们之前在 `sela < 0 || selb < 0` 时直接 return，于是：
+       · 指针一出网格，handleGridInput 整块跳过；
+       · S.select 永远起不来（要等 selbx 变化，但它已经变成 -1）；
+       · 而自动滚屏又要求 select > 0 / W_DRAG* 才生效 —— 死锁，
+         拖出去什么都不会发生，选不到一屏之外的内容。
+     现在：只有在【没有正在进行的框选】时才允许提前返回；正在框选时
+     把指针坐标夹到网格边界内继续参与计算（等价于原版"鼠标出不了窗口"）。 */
   if (sela < 0 || selb < 0) {
-    // 网格外：滚轮切换音色/音高
-    handleWheel();
-    return;
+    /* 【指针移出网格、但鼠标仍按着 → 可能是"拖出边缘"的开始，必须先把
+       框选激活，不能直接 return】
+       否则第一次越过边缘时 S.select 还是 0，这里就返回了，
+       下面启动框选的判定（要 selbx !== select_pressa）永远没机会执行 ——
+       S.select 起不来 → 自动滚屏也起不来，死锁。 */
+    if (G.mb[0] && S.select_pressx !== -1 && S.window === 0) {
+      /* 按着左键、且按下点在网格内（select_pressx 有值）→ 这就是拖出边缘，
+         先激活框选，把坐标夹到边界内继续。 */
+      S.select = 1;
+    }
+    if (!(S.select > 0) && S.window !== W_DRAGSELECTION) {
+      // 既没在框选、也不是拖出边缘：网格外只处理滚轮
+      handleWheel();
+      return;
+    }
+    /* 正在框选/拖选区：坐标夹进网格内，继续走下面的判定与结算。
+       自动滚屏（handleDragAutoscroll）已经在前面移动过 starta/startb，
+       所以下一帧夹出来的列号会自然增大 —— 这就是"拖出去能继续选"。 */
+    sela = clamp(sela, 0, Math.max(0, totalcols - 1));
+    selb = clamp(selb, 0, Math.max(0, totalrows - 1));
+    S.sela = sela; S.selb = selb;
+    S.selbx = floor(S.starta) + sela;
+    S.selby = floor(S.startb) + selb;
   }
 
   if (S.cursmarker) return;
@@ -1032,26 +1324,55 @@ function handleGridInput() {
 
 function handleWheel() {
   if (!G.wheel) return;
-  // 对照 control_draw.gml:312-340：
-  //   mouse_wheel_down()（G.wheel > 0）→ 乐器索引 -1 / 基准音 -1（降半音）
-  //   mouse_wheel_up()  （G.wheel < 0）→ 乐器索引 +1 / 基准音 +1（升半音）
-  // 之前把两者写反了，所以向下滚时基准音反而升高、乐器索引反而增加。
-  if (G.shift) {
-    if (G.wheel > 0 && S.selected_key > 0) {
-      S.selected_key--; playSound(INSTRUMENTS[S.instrument], S.selected_key, 100, 100, 0);
-    }
-    if (G.wheel < 0 && S.selected_key < 87) {
-      S.selected_key++; playSound(INSTRUMENTS[S.instrument], S.selected_key, 100, 100, 0);
-    }
-  } else {
-    let idx = S.instrument;
-    idx = clamp(idx - G.wheel, 0, INSTRUMENTS.length - 1);
+  /* 【滚轮语义取决于首选项 S.mousewheel —— 对照 control_draw.gml:310-344】
+     GML 是三个互斥分支：
+       :310  if (mousewheel = 1 && window = 0 && (exist = 0 || changepitch = 0)
+                  && !isplayer && !volume_scroll)   → 换音色
+       :329  if (mousewheel = 2 && …同上前提…)      → 换基准音（钢琴音调）
+       （mousewheel = 0 时两个分支都不执行，滚轮只交给滚动条）
+     注意原版【没有 Shift 修饰键】—— 用不用 Shift 是早期我们自己发明的分派方式，
+     而且完全没有读 mousewheel，于是默认配置（0 = 滚轮移动位置）下
+     滚一下滚轮就会静默改掉当前音色，与首选项里的选项正好相反，
+     且不进入撤销历史。
+     调用点保证了「改音符属性」的分支已经先跑过（handleGridInput 里
+     exist && changepitch 的情况会提前 return），所以这里等价于
+     GML 的 (exist = 0 || changepitch = 0) 前提。 */
+  if (S.window !== 0 || S.playing || S.volume_scroll) return;
+  const mw = S.mousewheel | 0;
+  if (mw === 1) {
+    /* 音色：G.wheel > 0（向下滚）→ 索引 -1；< 0（向上滚）→ +1。
+       对照 :312-327 里 mouse_wheel_down() 减、mouse_wheel_up() 加。 */
+    const idx = clamp(S.instrument - G.wheel, 0, INSTRUMENTS.length - 1);
     if (idx !== S.instrument) {
       S.instrument = idx;
       S.selected_vel = 100; S.selected_pan = 100; S.selected_pit = 0;
       if (INSTRUMENTS[idx]) playSound(INSTRUMENTS[idx], S.selected_key, 100, 100, 0);
     }
+  } else if (mw === 2) {
+    /* 基准音：对照 :330-343，向下滚 -1、向上滚 +1，范围 0..87 */
+    if (G.wheel > 0 && S.selected_key > 0) {
+      S.selected_key--;
+      S.selected_vel = 100; S.selected_pan = 100; S.selected_pit = 0;
+      playSound(INSTRUMENTS[S.instrument], S.selected_key, 100, 100, 0);
+    }
+    if (G.wheel < 0 && S.selected_key < 87) {
+      S.selected_key++;
+      S.selected_vel = 100; S.selected_pan = 100; S.selected_pit = 0;
+      playSound(INSTRUMENTS[S.instrument], S.selected_key, 100, 100, 0);
+    }
   }
+  // mw === 0：滚轮用于滚动歌曲（由 draw_scrollbar 里的悬停分支处理），这里什么都不做
+}
+
+/* 对照 control_draw.gml:736-767：Ctrl + 滚轮 缩放窗口。
+   原版这一段在 `window = 0 && text_focus = -1 && playing = 0 &&
+   keyboard_check(vk_control) && !keyboard_check(vk_shift)` 里面，
+   所以【必须按住 Ctrl】才不会和滚动条抢滚轮。之前完全没实现滚轮缩放。 */
+function handleCtrlWheelZoom() {
+  if (!G.wheel) return;
+  if (S.window !== 0 || S.playing || UI.textFocus >= 0) return;
+  if (!G.ctrl || G.shift) return;
+  if (G.wheel < 0) zoomIn(); else zoomOut();
 }
 
 /* 时间轴 / 标记 / 区间交互（对照 control_draw:207-270 与 1109-1175） */
@@ -1061,7 +1382,37 @@ function handleTimelineInput() {
 
   // 正在拖播放标记
   if (S.window === W_DRAGMARKER) {
-    S.marker_pos = (G.mouse.x - gx) / 32 + floor(S.starta);
+    /* 【必须在 0..enda 之间夹紧 —— 用户报"播放刻度线可以被拖到负数"】
+       原来是 (mouse_x - gx)/32 + floor(starta)，没有任何边界检查。
+       鼠标往画布左边一拖（mouse_x < gx）就是负值，于是：
+         · 刻度线画到画布外面（看不到，像是"消失了"）；
+         · S.marker_pos 变负，后续所有按它算的列号/播放位置全部错乱
+           （marker_pos 参与 note_offset、播放起点、区间运算）。
+       对照 GML control_draw:1109 附近，原版是 `max(0, …)` 起步的，
+       而且 enda 上限在别处另有 clamp；这里统一夹到 [0, enda]，
+       让"拖到最左 = 第 0 列、拖到最右 = 最后一列"，符合通用预期。 */
+    /* 【上限是 enda + totalcols，不是 enda】
+       用户报："为什么现在刻度线没有办法被拖到最后一个音符后面了？"
+       因为我第一次修"可以拖到负数"时把上限写成了 S.enda，
+       那正好等于【最后一个音符所在的列】，于是刻度线被卡死在最后一个音符上，
+       再往右一格都拖不过去 —— 而 GML 允许拖到整屏之后。
+       对照 control_draw.gml：
+         :1110  拖动时  marker_pos = (mouse_x - x1 + 2)/32 + starta   ← 不夹紧
+         :1192  每帧末  marker_pos = median(0, marker_pos, enda + totalcols)  ← 夹紧
+       所以正确范围是 [0, enda + totalcols]：左边从头开始，
+       右边允许一直延伸到"当前视图再往后一整屏"。 */
+    const raw = (G.mouse.x - gx) / 32 + floor(S.starta);
+    S.marker_pos = median(0, raw, Math.max(0, S.enda + totalcols));
+    /* 【千万不要在这里同步 marker_prevpos】
+       这里曾经写过 `S.marker_prevpos = S.marker_pos;`，本意是"拖动时别让
+       prevpos 落后"，结果把拖动试听整个弄哑了：
+       drawEditor 的即时触发条件是
+           floor(marker_pos) !== floor(marker_prevpos)   → 跨格了才发一列音
+       把 prevpos 同步成 marker_pos 之后两者永远相等，跨格检测恒为 false，
+       于是【拖动刻度线一个音都不响】—— 就是用户报的
+       "手动拖动播放刻度线，无法播放音符"。
+       prevpos 只应该由播放推进和正常跳转去更新，拖动过程中必须保持旧值，
+       这样每拖过一列才能被检测到并播出来。 */
     /* 拖动标记会移动播放位置，已排期的未来音符必须作废，
        否则拖动后那些旧排期还会在原来的时刻响起。 */
     stopScheduledAudio();
@@ -1116,7 +1467,10 @@ function handleTimelineInput() {
     if (S.select === 0 && G.mbp[2] && !S.cursmarker) openSectionMenu();
     if (G.mbp[0] && !S.cursmarker) S.timeline_pressa = floor(S.starta) + floor((G.mouse.x - gx) / 32);
     if (G.mbr[0] && !S.cursmarker) {
-      S.marker_pos = floor(S.starta) + (G.mouse.x - gx) / 32;
+      /* 夹到 [0, enda + totalcols] —— 同拖动分支，对照 control_draw.gml:1192。
+         左边防止点到时间轴外侧时算出负数；右边允许落到最后一个音符之后。 */
+      S.marker_pos = median(0, floor(S.starta) + (G.mouse.x - gx) / 32,
+        Math.max(0, S.enda + totalcols));
       // 点了时间轴 = 跳转播放位置，作废已排期的未来音符
       stopScheduledAudio();
       S.timeline_pressa = -1;
@@ -1136,10 +1490,21 @@ function handleTimelineInput() {
 
 /* 钢琴 */
 function handlePianoInput() {
-  if (!S.show_piano || S.fullscreen || isDialogWindow(S.window)) return;
+  /* 【必须用 S.window === 0，不能用 isDialogWindow】
+     对照 draw_piano.gml:141：
+         if (window = 0 && text_focus = -1 && key_edit = -1 && !keyboard_check(vk_control))
+     isDialogWindow(w) 对 TRANSIENT_WINDOWS（W_DRAG/W_DRAGMARKER/W_DRAGSELECTION/
+     W_DRAGSECTION_START/W_DRAGSECTION_END/W_DRAGVOL/W_DRAGSTEREO/W_DRAGTEMPO/
+     W_DRAGMARKER/W_RELEASE/W_INSBOX）返回 false，也就是这些拖拽状态下
+     钢琴输入照常生效 —— 表现为「按住鼠标拖选/拖标记的同时敲钢琴快捷键，
+     会一边拖一边录制音符」。这里改成严格等于 0，与原版一致。
+     （同文件的 pianoInputOpen() 早就是正确写法，本函数之前漏了。） */
+  if (!S.show_piano || S.fullscreen || S.window !== 0) return;
   const kc = S.dropmode ? 52 : S.keysshow;
   const px = floor(S.rw / 2 - (kc * 39) / 2);
   const py = S.rh - 154;
+  /* 对照 control_draw.gml:2379：光标提示也要 window = 0。
+     外层已经用 S.window !== 0 早退，所以这里能到达就说明 window === 0。 */
   if (mouseRectangle(px, py - 8, kc * 39, 136)) G.cursor = 'pointer';
   // 键盘按键
   if (UI.textFocus < 0 && S.key_edit === -1 && !G.ctrl) {
@@ -1294,7 +1659,7 @@ function drawEditor(dt) {  const c = G.ctx;
       }
       let s = 0;
       if (S.playing === 0 && S.selected === 0) {
-        if (S.selbx === col && S.selby === layer && !isDialogWindow(S.window) && !S.cursmarker) alpha += 0.5;
+        if (S.selbx === col && S.selby === layer && controlInteractive() && !S.cursmarker) alpha += 0.5;
       }
       /* 【收集 Tempo Changer 方块的位置，供稍后画 BPM 标签】
          对照 control_draw.gml:408：
@@ -1373,18 +1738,47 @@ function drawEditor(dt) {  const c = G.ctx;
   // 面板底色
   setColor(C.panel);
   fillRect(0, 0, rw, y1 + 2);
+  /* 网格外围的"墙"（对照 control_draw.gml:1234-1239）。
+     【四个数字必须和 GML 一模一样，差 1~2px 就会在滚动条旁边露出一条缝】
+        · 左下墙  y 从 y1 + rows*32 + 50 起   ← 原来写成 +52，多留了 2px 空档
+        · 右墙    y 到 y1 + rows*32 + 49 为止  ← 原来写成 +48，少铺 1px 空档
+        · 右下角补块 17x18 起于 (x1+cols*32+2, y1+rows*32+32)（无偏移，本来就对）
+     这几块墙铺的是面板底色，而滚动条背景精灵是更亮的一档颜色，
+     两者之间只要差几个像素就会形成一条明显的浅色细线 ——
+     用户看到的就是"滚动条没有紧贴画布边缘，中间有微小缝隙"。 */
   if (!S.fullscreen) {
     if (S.show_layers) fillRect(0, y1 + 3, x1 + 1, rh - y1 - 3);
-    fillRect(gx, S.y1 + totalrows * 32 + 52, rw - gx, rh);
-    fillRect(gx + totalcols * 32 + 18, y1 + 3, rw - (gx + totalcols * 32 + 18), totalrows * 32 + 48);
+    fillRect(gx, S.y1 + totalrows * 32 + 50, rw - gx, rh);
+    fillRect(gx + totalcols * 32 + 18, y1 + 3, rw - (gx + totalcols * 32 + 18), totalrows * 32 + 49);
     setColor(C.panel);
     fillRect(gx + totalcols * 32 + 2, S.y1 + totalrows * 32 + 32, 17, 18);
   }
 
+  /* 【补画一次播放标记 —— 修"倒三角被层操作栏遮挡"】
+     见 drawMarkerAt 的说明：上面那几块墙 / 面板底色是【在 drawTimeline 之后】
+     铺的，会把 marker_pos = 0 时倒三角的左半边盖掉。
+     这里在所有底色铺完之后、滚动条之前，把标记重新画一遍到最上层。
+     （GML 里没有这一步，属于有意偏离，为的是标记始终完整可见。） */
+  if (!S.fullscreen) {
+    const mxx2 = gx + floor(S.marker_pos * 32 - S.starta * 32);
+    drawMarkerAt(mxx2, y1);
+  }
+
   // 滚动条
+  /* 对照 control_draw.gml:1245-1262：
+       非全屏：横条贴在网格下方、竖条贴在网格右侧（普通静态位置）
+       全屏：  改成【浮动滚动条】——贴在屏幕最下边/最右边，
+               平时藏起来（anim = 0），指针移到那 25px 热区才升起来，
+               离开后自动收回。热区高度 16px 就是滚动条自身的厚度。
+     我们之前是全屏时整块跳过，于是全屏下完全不能滚动视图 ——
+     只能靠拖动画布边缘的自动滚屏或键盘，长歌曲在全屏里几乎没法导航。
+     原版的"升起/收起"是每帧 ±(2*30/room_speed) 的缓动，
+     对应 60fps 下约 1 单位/帧，最快 16 帧（约 0.27 秒）走完。 */
   if (!S.fullscreen) {
     drawHScrollbar();
     drawVScrollbar();
+  } else {
+    drawFullscreenScrollbars();
   }
 
   // 图层面板
@@ -1707,15 +2101,41 @@ function drawTimeline() {
   // 刻度线就固定在屏幕中间不动，只有底下的网格靠 note_offset 做亚格平滑地滚动。
   // 之前在这里多减了一个 noff，等于把网格的滚动量又叠加到刻度线上，
   // 每帧来回抖 —— 用户看到的就是「按帧时进度条和时间轴一直抽搐」。
-  const mo = 6 * ((S.theme === 2 || (S.blackout && S.theme !== 3)) ? 1 : 0) + 8 * (S.theme === 3 ? 1 : 0);
-  const mcol = S.theme === 3 ? T.accent[3] : -1;
   const mxx = gx + floor(S.marker_pos * 32 - S.starta * 32);
   // 同上：先竖线、后倒三角，避免线切在三角上
+  drawMarkerAt(mxx, y1);
+  setAlpha(1);
+  setFont(FONT.main());
+}
+
+/* 播放标记（竖线 + 顶部倒三角）的独立绘制。
+   抽成函数是因为它要在【两个时机】各画一次：
+     1) drawTimeline() 里正常画一次（顺序与原版一致）；
+     2) 面板底色 / "墙" 画完之后再画一次 ——
+        用户报："播放进度处于 0 的时候，刻度线顶部的倒三角会被层操作栏遮挡一部分。"
+        根因：倒三角 sprite 是 16x15、原点 xo=8，所以它横跨 marker 左右各 8px。
+        当 marker_pos = 0 时 mxx = gx = 266，三角覆盖 258..274，
+        其中 258..265 落在层操作栏那一列（x < x1+1 = 265）。
+        而 drawEditor 里 `fillRect(0, y1+3, x1+1, rh)` 是【在 drawTimeline 之后】
+        才执行的（那是 GML control_draw:1234 的面板底色填充），
+        于是它把三角的左半边整块刷掉了 —— 看起来就是"三角缺了一角"。
+        原版 GML 的顺序确实也是 marker(1220) 在墙(1234) 之前，
+        但原版的层操作栏由独立对象在其后绘制，三角同样会被压到下面；
+        这里的处理是【把三角补画到最上层】，保证它始终完整可见 ——
+        这是有意偏离 GML 的一处，理由就是"标记必须始终能看见"。 */
+function drawMarkerAt(mxx, y1) {
+  const mo = 6 * ((S.theme === 2 || (S.blackout && S.theme !== 3)) ? 1 : 0) + 8 * (S.theme === 3 ? 1 : 0);
+  const mcol = S.theme === 3 ? T.accent[3] : -1;
+  /* 【不要裁剪到网格区】
+     第一版在这里加了 `c.rect(S.x1 + 1, …); c.clip()`，想把三角限制在网格内，
+     结果正好把要修的东西又切掉了：marker_pos = 0 时 mxx = gx = x1+2，
+     而三角 sprite 是 16 宽、原点 xo=8，本来就横跨 mxx-8 .. mxx+8，
+     左侧 8px 必然伸进层操作栏所在的 x < x1+1 区域。
+     裁剪到 x1+1 之后左半边消失，看起来和"被层栏遮挡"一模一样。
+     用户的诉求是【三角必须完整可见】，所以这里不裁剪，整块画上去。 */
   drawSprite('spr_marker', mo + 1, mxx, y1 + 2, 1 + (S.window_scale <= 0.5 ? 1 : 0),
     (S.totalrows + 1) * 32 / 15, 1, mcol);
   drawSprite('spr_marker', mo + 0, mxx, y1 + 2, 1, 1, mcol);
-  setAlpha(1);
-  setFont(FONT.main());
 }
 
 /* ---------------------------------------------------------------- 滚动条 */
@@ -1760,9 +2180,78 @@ function drawHScrollbar() {
  *   所以这里画成 48×48 的圆角按钮，图标按 3 倍缩放绘制并居中；
  *   命中区再向外扩 4px 容差，实际有效触控区约 56×56。
  *   位置相应往内收，保证在屏幕内且不压住右下角的音符。 */
-const FS_EXIT_SIZE = 48;      // 按钮视觉尺寸
-const FS_EXIT_MARGIN = 10;    // 距屏幕右下角的边距
-const FS_EXIT_PAD = 4;        // 命中区在视觉尺寸外再扩的容差
+
+/* ============================================================================
+ * 全屏模式下的浮动滚动条 —— 完整对照 control_draw.gml:1248-1262
+ *
+ * 【原版行为】
+ *   // horizontal rise animation
+ *   if (mouse_rectangle(0, rh - 25, rw, rh)) {
+ *       if (window = 0 && sbh_anim < 16) sbh_anim += (2*30/room_speed) * (1/currspeed)
+ *   } else if (sb_drag = -1) {
+ *       if (sbh_anim > 0) sbh_anim -= (2*30/room_speed) * (1/currspeed)
+ *   }
+ *   // vertical 同理，热区是 (rw - 25, 0, rw, rh)
+ *   starta = draw_scrollbar(scrollbarh, 0, rh - sbh_anim, 32,
+ *                           ((rw - 16) / 32) - 1, enda + totalcols - 2, …)
+ *   startb = draw_scrollbar(scrollbarv, rw - sbv_anim, rhval, 32,
+ *                           ((rh - rhval - 16) / 32) - 1, endb + totalrows - 2, …)
+ *
+ * 也就是：
+ *   · 横条 y = rh - sbh_anim（anim=0 时正好完全藏在屏幕外，anim=16 时升起 16px，
+ *     正好是滚动条厚度 → 完全可见）
+ *   · 竖条 x = rw - sbv_anim
+ *   · slots 用 ((rw-16)/32)-1 / ((rh-rhval-16)/32)-1 —— 注意【不是】totalcols-1，
+ *     因为滚动条横跨整个屏幕宽度，能容纳的格数比网格多（网格左边还让出了图层面板）
+ *   · maxslots 用 enda + totalcols - 2 / endb + totalrows - 2
+ *   · 只有 window = 0 时才允许升起（有对话框时不弹出来打扰）
+ *   · 正在拖滚动条（sb_drag != -1）时不收回，否则拖到热区外会突然消失
+ *
+ * 【为什么必须补】
+ * 我们之前全屏时整块跳过滚动条，于是全屏模式下完全无法滚动视图，
+ * 长歌曲在全屏里几乎没法导航（只能靠拖拽到边缘的自动滚屏或键盘翻页）。
+ * ========================================================================== */
+function drawFullscreenScrollbars() {
+  const rw = S.rw, rh = S.rh;
+  const rhval = S.rhval === undefined ? 270 : S.rhval;
+  /* 缓动步长：(2*30/room_speed) * (1/currspeed)。
+     原版 room_speed=60、currspeed≈1 时约 1/帧，16 帧走满 16px。
+     这里按同一数量级取 1（我们的帧率由 rAF 驱动，不固定 60）。 */
+  const STEP = 1;
+  const exist = S.hover.exist;
+  const cant = ((exist && S.changepitch) || S.mousewheel > 0) ? 1 : 0;
+
+  /* ---- 横向 ---- */
+  if (mouseRectangle(0, rh - 25, rw, rh)) {
+    if (S.window === 0 && (S.sbh_anim || 0) < 16) S.sbh_anim = Math.min(16, (S.sbh_anim || 0) + STEP);
+  } else if (SB.drag[0] === -1) {
+    if ((S.sbh_anim || 0) > 0) S.sbh_anim = Math.max(0, (S.sbh_anim || 0) - STEP);
+  }
+  /* ---- 纵向 ---- */
+  if (mouseRectangle(rw - 25, 0, rw, rh)) {
+    if (S.window === 0 && (S.sbv_anim || 0) < 16) S.sbv_anim = Math.min(16, (S.sbv_anim || 0) + STEP);
+  } else if (SB.drag[1] === -1) {
+    if ((S.sbv_anim || 0) > 0) S.sbv_anim = Math.max(0, (S.sbv_anim || 0) - STEP);
+  }
+
+  /* anim 为 0 时滚动条整条在屏幕外，没有绘制的必要；
+     但【仍然要更新 SB.val】，否则恢复显示时拖块位置会是旧的。 */
+  const hSlots = Math.max(1, Math.floor((rw - 16) / 32) - 1);
+  const hMax = Math.max(1, S.enda + S.totalcols - 2);
+  if (SB.drag[0] === -1) SB.val[0] = clamp(S.starta, 0, Math.max(0, hMax - hSlots));
+  if ((S.sbh_anim || 0) > 0) {
+    const v = drawScrollbarGML(0, 0, rh - S.sbh_anim, 32, hSlots, hMax, cant, 0);
+    if (SB.drag[0] !== -1) S.starta = clamp(v, 0, Math.max(0, hMax - hSlots));
+  }
+
+  const vSlots = Math.max(1, Math.floor((rh - rhval - 16) / 32) - 1);
+  const vMax = Math.max(1, S.endb + S.totalrows - 2);
+  if (SB.drag[1] === -1) SB.val[1] = clamp(S.startb, 0, Math.max(0, vMax - vSlots));
+  if ((S.sbv_anim || 0) > 0) {
+    const v2 = drawScrollbarGML(1, rw - S.sbv_anim, rhval, 32, vSlots, vMax, cant, 0);
+    if (SB.drag[1] !== -1) S.startb = clamp(v2, 0, Math.max(0, vMax - vSlots));
+  }
+}
 
 function drawFullscreenExit() {
   if (!S.fullscreen) return;
@@ -1773,8 +2262,15 @@ function drawFullscreenExit() {
 
   // 命中的矩形比按钮本身大一圈，手指按偏一点也能中
   const hov = mouseRectangle(xx - FS_EXIT_PAD, yy - FS_EXIT_PAD, sz + FS_EXIT_PAD * 2, sz + FS_EXIT_PAD * 2)
-    && !isDialogWindow(S.window);
+    && controlInteractive();
+  /* 把"本帧鼠标是否压在这个按钮上"记下来，给 editorFrame 下一帧用在
+     handler 之前拦按下（见那边的说明）。按钮位置只跟 rw/rh 有关，
+     一帧的延迟不影响判定准确度。 */
+  S.fullHoverExit = hov;
   if (hov) { G.cursor = 'pointer'; popupSet(xx, yy, sz, sz, '返回（退出全屏）'); }
+
+  /* 按下帧的拦截在 editorFrame 里做（见那边 S.fullHoverExit 的说明）——
+     这里只负责松手时的动作。 */
 
   /* 底板：做成明显的按钮而不是裸图标 ——
      全屏时背景是亮色网格，只有底板才能在网格上也一眼看见。
@@ -1858,7 +2354,7 @@ function drawDrawer() {
     const t = tabs[i];
     const tx = 4 + i * tw;
     const active = S.drawer === t.id;
-    const hover = mouseRectangle(tx, ty, tw - 2, DRAWER_H) && !isDialogWindow(S.window);
+    const hover = mouseRectangle(tx, ty, tw - 2, DRAWER_H) && controlInteractive();
     if (hover) G.cursor = 'pointer';
     if (active) {
       setColor(C.accent);
@@ -1925,7 +2421,7 @@ function drawDrawer() {
      · 按下即收 —— 点遮罩立刻有反馈，不用等抬手；
      · 抬手也收 —— 手指从面板里滑到遮罩上再松开（常见操作）也能收起。
      两者都要求指针落在遮罩矩形内，且当前没有对话框抢焦点。 */
-  if (inScrim && !isDialogWindow(S.window) && (mbpScrim[0] || mbrScrim[0])) {
+  if (inScrim && controlInteractive() && (mbpScrim[0] || mbrScrim[0])) {
     S.drawer = ''; UI.swallowPress = true;
     return;
   }
@@ -1941,30 +2437,22 @@ function drawDrawer() {
   fillRect(0, py, rw, ph);
   setColor(C.separator);
   line(0, py, rw, py);
-  /* 顶部把手：既是视觉提示，也是【关闭热区】。
-     原来是纯装饰（只画一条 6px 的小横条），用户很自然地去点它、
-     或者点抽屉顶上那一片空白想收起，结果毫无反应 ——
-     只能去点底部标签栏，或者点抽屉外面的遮罩，两条路都不直观。
-     现在把「抽屉顶部这一条」整条做成关闭热区：
-     高度 DRAWER_GRAB_H（比那条视觉小横条高得多，手指好点），
-     覆盖全宽，点了就收起。 */
-  const grabHit = DRAWER_GRAB_H;
-  const inGrab = mouseRectangle(0, py, rw, grabHit) && !isDialogWindow(S.window);
-  if (inGrab) G.cursor = 'pointer';
-  setColor(inGrab ? C.text : C.textDim);
+  /* 顶部把手条：纯视觉提示，【不再】是关闭热区。
+     —— 用户明确要求「点抽屉里的空白部分不要关闭，而是点遮罩或再次点底部标签」。
+     之前把这一整条（全宽 × DRAWER_GRAB_H）做成"点击即收"，
+     于是在图层列表上方那一片看起来就是"抽屉空白"的地方点一下，
+     抽屉就没了 —— 用户会当成误触，且毫无心理预期。
+     现在收起抽屉只剩两条路：
+       · 点抽屉外面的灰色遮罩
+       · 再次点底部对应的抽屉标签（toggle）
+     把手条仍画出来：它告诉用户"这是一块浮动面板"，
+     只是不再响应点击，也不给 pointer 光标（不可点的东西不该有可点的提示）。 */
+  setColor(C.textDim);
   roundRect(rw / 2 - 18, py + 3, rw / 2 + 18, py + 6, 2, true);
-  {
-    const mbrTap2 = (UI.rawMbr || G.mbr);
-    if (inGrab && mbrTap2[0]) {
-      S.drawer = '';
-      UI.swallowPress = true;
-      return;
-    }
-  }
 
-  /* 子面板从抓手条下方开始画，避免和「点这里收起」的热区抢同一片区域 ——
-     否则在图层列表第一行点一下，会被抓手判定截走，变成"想点按钮却关了抽屉"。
-     cy 就是内容区的起点与高度。 */
+  /* 子面板从把手条下方开始画。
+     顶部那条区域现在完全不可点（只是视觉提示），所以内容区不会和关闭热区抢地方；
+     这里留出 DRAWER_GRAB_H 的高度纯粹是为了视觉留白，让面板顶部不显得拥挤。 */
   const cy = py + DRAWER_GRAB_H;
   const ch = ph - DRAWER_GRAB_H;
   if (S.drawer === 'layers') drawDrawerLayers(cy, ch);
@@ -2062,7 +2550,7 @@ function drawDrawerLayers(py, ph) {
     const layer = floor(S.drawer_scroll) + i;
     if (layer >= total) break;
     const y = py + 6 + i * rowH;
-    const rowHover = mouseRectangle(2, y, rw - 4, rowH - 2) && !isDialogWindow(S.window);
+    const rowHover = mouseRectangle(2, y, rw - 4, rowH - 2) && controlInteractive();
     if (rowHover) { setColor(C.controlBgHover); roundRect(2, y, rw - 2, y + rowH - 4, 4, true); }
 
     setFont(FONT.small());
@@ -2083,7 +2571,7 @@ function drawDrawerLayers(py, ph) {
     // 用 layerIcon 画（内部按主题分派），命中矩形比图标略大一点便于手指点
     const iconBtn = (n, pressed, tip, fn) => {
       if (bx + btnSize > rw - padR) return;
-      const h = mouseRectangle(bx - 1, by - 1, hitSize, hitSize) && !isDialogWindow(S.window);
+      const h = mouseRectangle(bx - 1, by - 1, hitSize, hitSize) && controlInteractive();
       if (h) { G.cursor = 'pointer'; popupSet(bx - 1, by - 1, hitSize, hitSize, tip); }
       layerIcon(n, bx, by, pressed, tip);
       if (h && G.mbr[0]) { fn(); UI.swallowPress = true; }
@@ -2227,7 +2715,10 @@ function drawDrawerPiano(py, ph) {
   G.mb = UI.rawMb || rawMb;
   G.mbp = UI.rawMbp || rawMbp;
   G.mbr = UI.rawMbr || rawMbr;
+  /* 抽屉里的这份绘制要允许点击（见 pianoInputOpen 的说明） */
+  S.drawer_piano_input = 1;
   drawPiano(px, yy, kc, S.totalcols);
+  S.drawer_piano_input = 0;
   G.mb = rawMb; G.mbp = rawMbp; G.mbr = rawMbr;
   S.startkey = savedStart; S.sharpkeys = savedSharp;
 
@@ -2239,7 +2730,7 @@ function drawDrawerPiano(py, ph) {
   const bw = 34, bh = 26;
   setFont(FONT.main(13));
   const octBtn = (label, x, y, fn, enabled) => {
-    const h = enabled && mouseRectangle(x, y, bw, bh) && !isDialogWindow(S.window);
+    const h = enabled && mouseRectangle(x, y, bw, bh) && controlInteractive();
     if (h) G.cursor = 'pointer';
     // 和主题一致：用 C.accent 描边 + 面板底色，而不是硬编码灰色
     setColor(enabled ? (h ? C.controlBgHover : C.panel) : C.panel);
@@ -2306,7 +2797,7 @@ function drawDrawerProps(py, ph) {
     setFont(FONT.main(11));
     const w = textWidth(label) + 22;
     if (bx + w > rw - 10) return;
-    const h = mouseRectangle(bx, by, w, 24) && !isDialogWindow(S.window);
+    const h = mouseRectangle(bx, by, w, 24) && controlInteractive();
     if (h) G.cursor = 'pointer';
     setColor(h ? C.controlBgHover : (C.dark ? '#3a3a3a' : '#dcdcdc'));
     roundRect(bx, by, bx + w, by + 24, 4, true);
@@ -2327,7 +2818,28 @@ function drawVScrollbar() {
   const cant = (exist && S.changepitch) || S.mousewheel > 0;
   const ms = S.endb + S.totalrows - 1, sl = S.totalrows - 1;
   if (SB.drag[1] === -1) SB.val[1] = clamp(S.startb, 0, Math.max(0, ms - sl));
-  const v = drawScrollbarGML(1, S.x1 + S.totalcols * 32 + 2, S.y1 + 34, 32, sl, ms, cant ? 1 : 0, 0);
+  /* 【x 位置必须夹在屏幕内】
+     原版（以及照抄过来的横屏布局）把纵向滚动条放在网格右边缘：
+         xx = x1 + totalcols*32 + 2
+     横屏时网格只占左边一部分，右边还有一大片空白，这个位置正好在屏内。
+     竖屏就不成立 —— 窄屏下 totalcols 是按屏宽算出来的，
+     x1 + totalcols*32 本身就已经顶到（甚至超出）rw：
+       实测 390x844 时 x1=-2、totalcols=13 → xx=416 > rw=390，
+     整条滚动条画在了屏幕右侧外面：看不见、也点不到。
+     这就是"竖屏模式纵向滚动条不见了"的根因 —— 不是没画，是画到屏外去了。
+
+     修法：给它一个上限，保证整条留在屏内。
+     【宽度必须用 16，不是 32】
+       纵向滚动条的所有 sprite（v_background / v_button_* / v_bar_*）
+       宽都是 16px（见 atlas.json），绘制时也只拉伸高度、不拉伸宽度。
+       第一版这里错写成 SCROLLBAR_W = 32，于是在横屏下把本来位于
+       x=1258 的滚动条硬拉到 1246，凭空左移 12px、压到网格最后一列上，
+       看起来就是"滚动条和画布之间有条缝/贴错位置"。
+       用 16 才是它的真实宽度，横屏时上限（rw-18=1262）大于原位置，
+       Math.min 取原值，布局保持和原版一致。 */
+  const SCROLLBAR_W = 16;
+  const vx = Math.min(S.x1 + S.totalcols * 32 + 2, S.rw - SCROLLBAR_W - 2);
+  const v = drawScrollbarGML(1, vx, S.y1 + 34, 32, sl, ms, cant ? 1 : 0, 0);
   S.startb = clamp(v, 0, Math.max(0, ms - sl));
 }
 
@@ -2357,19 +2869,45 @@ function drawLayersPanel() {
   drawSprite('spr_layerbox', lbFrame, lx, ly);
 
     // 名称
+    /* 对照 control_draw.gml:1319-1324 —— 输入框位置【分主题不同】，
+       这正是"层名称没和框对齐、歪了一点"的根因：
+         theme != 3  : draw_text_edit(..., x1 + 11, y1 + 10, 72, 14)
+         theme == 3  : draw_textarea (..., x1 +  9, y1 +  4, 72, 24)
+       原来不分主题统一用 (lx+9, ly+7, 72, 18)：
+         · Fluent 下框高是 24、起点 +4，文字却按 +7 起、18 高画，
+           于是整体偏下 3px、且高度不匹配 —— 看起来就是"歪了一点"；
+         · 经典/复古/暗黑下应该是 +11/+10 起、72x14，
+           我们画成 +9/+7 起、18 高，文字偏左上。
+       占位提示文字（"第 N 层"）也跟着对应分支走。 */
     setFont(FONT.small());
     setColor(C.text);
-    const nameVal = textEdit(400 + layer, S.layername[layer], lx + 9, ly + 7, 72, 18);
+    const isFluent = (S.theme === 3);
+    const nameX = lx + (isFluent ? 9 : 11);
+    const nameY = ly + (isFluent ? 4 : 10);
+    const nameW = 72;
+    const nameH = isFluent ? 24 : 14;
+    const nameVal = textEdit(400 + layer, S.layername[layer], nameX, nameY, nameW, nameH);
     S.layername[layer] = nameVal;
     if (!nameVal) {
       setColor(C.textDim);
-      text(lx + 11, ly + 9, '第 ' + (layer + 1) + ' 层');
+      /* 占位文字在 GML 里是 draw_text_dynamic(x1 + 11, y1 + 10, …)，
+         draw_text_dynamic 内部有 `-1 * !is_ascii`（中文上移 1px）的补偿，
+         而真实层名走的是 draw_text_edit（没有这个补偿）。
+         所以占位文字比 textEdit 画出的文字【高 1px】才是对的：
+           textEdit 基准 = ly+10 + 1 - 1 = ly+10
+           占位    基准 = ly+10 + 3 - 3 = ly+10，再 -1 → ly+9
+         实测占位文字 y=10..19、框 10..22，上留 0 下留 3；有名字时 y=11..20。
+         两者差 1px 正是原版 draw_text_dynamic 与 draw_text_edit 的固有差异，
+         保留它，不要"对齐"成一样 —— 那会偏离 GML。 */
+      text(lx + 11, ly + 10 + 3 - 3 - 1, '第 ' + (layer + 1) + ' 层');
     }
     setFont(FONT.main());
 
     // 音量（基帧 + 等级叠加）
     if (S.realvolume) {
-      const hover = mouseRectangle(lx + 88, ly + 5, 16, 22) && !isDialogWindow(S.window);
+      /* 高度必须是 25 —— GML control_draw.gml:1335 是 mouse_rectangle(x1+88, y1+5, 16, 25)，
+     我们原来写 22，图标下半截点不到。 */
+  const hover = mouseRectangle(lx + 88, ly + 5, 16, 25) && controlInteractive();
       const vol = layer < S.endb2 ? (S.layervol[layer] || 100) : 100;
       const dy = hover ? -3 : 0;
       const iconColor = S.fdark ? '#ffffff' : '#000000';
@@ -2402,7 +2940,8 @@ function drawLayersPanel() {
     }
     // 立体声（主题分派同音量图标，对照 control_draw.gml:1376-1377）
     if (!S.realstereo) {
-      const hover = mouseRectangle(lx + 108, ly + 5, 16, 22) && !isDialogWindow(S.window);
+      // 同上：GML control_draw.gml:1370 也是高 25
+  const hover = mouseRectangle(lx + 108, ly + 5, 16, 25) && controlInteractive();
       const st = layer < S.endb2 ? (S.layerstereo[layer] || 100) : 100;
       const dy = hover ? -3 : 0;
       const iconColor = S.fdark ? '#ffffff' : '#000000';
@@ -2456,11 +2995,22 @@ function drawLayersPanel() {
     const iy = ly + 8;
     const lockOn = layer < S.endb2 && S.layerlock[layer] === 1;
     const soloOn = layer < S.endb2 && S.layerlock[layer] === 2;
-    if (layerIcon(0, lx + 126 - off, iy, lockOn, '静音本层\n（拖拽可批量操作）')) {
+    /* 【tooltip 不能承诺原版没有的功能】
+       之前这里写着「拖拽可批量操作」「拖拽可批量添加/删除」，
+       但对照 draw_layericon.gml 全文（1-43 行）与 draw_icon.gml（1-49 行）
+       可以确认：原版的这两个图标函数【都没有拖拽批量】逻辑，
+       返回值是 (mouse_entered || (a && mouse_check_button_pressed(mb_left)))
+       与 (a && mouse_check_button_released(mb_left)) —— 只有单击语义。
+       我们也没有实现批量拖拽（差异 19 的另一半），
+       所以这行 tooltip 属于"界面在说谎"，用户按下拖过去以为会批量生效，
+       实际只有第一下生效。这里如实改成单击语义。
+       （要真正支持批量，应当按 GML 的做法另开一个拖拽窗口状态，
+        而不是只改文案。留给后续。） */
+    if (layerIcon(0, lx + 126 - off, iy, lockOn, '静音本层')) {
       if (S.layerlock[layer] === 2) S.solostr = S.solostr.replace('|' + layer + '|', '');
       S.layerlock[layer] = lockOn ? 0 : 1; S.changed = 1;
     }
-    if (layerIcon(1, lx + 144 - off, iy, soloOn, '独奏本层\n（拖拽可批量操作）')) {
+    if (layerIcon(1, lx + 144 - off, iy, soloOn, '独奏本层')) {
       if (S.layerlock[layer] === 2) { S.layerlock[layer] = 0; S.solostr = S.solostr.replace('|' + layer + '|', ''); }
       else { S.layerlock[layer] = 2; S.solostr += '|' + layer + '|'; }
       S.changed = 1;
@@ -2475,8 +3025,8 @@ function drawLayersPanel() {
         S.selected_layers.push(layer);
       }
     }
-    if (layerIcon(3, lx + 180 - off, iy, 0, '新建层\n（拖拽可批量添加）')) { S.playing = 0; addLayer(layer, false); }
-    if (layerIcon(4, lx + 198 - off, iy, 0, '删除层\n（拖拽可批量删除）')) { S.playing = 0; removeLayer(layer, false); }
+    if (layerIcon(3, lx + 180 - off, iy, 0, '新建层')) { S.playing = 0; addLayer(layer, false); }
+    if (layerIcon(4, lx + 198 - off, iy, 0, '删除层')) { S.playing = 0; removeLayer(layer, false); }
     if (layer > 0 && layerIcon(5, lx + 216 - off, iy, 0, '上移本层')) { S.playing = 0; shiftLayers(layer, layer - 1, false); }
     // 对照 control_draw.gml:1461 `x1 + 234 - !realvolume - realstereo*10 - (startb+b = 0)*8`：
     // 第一层时再左移 8px（因为第一层没有「上移」图标，下移图标补到它的位置上）。
@@ -2494,8 +3044,29 @@ function drawLayersPanel() {
                  基帧 i - locked + 9*(!fdark) 用 color（theme 2/3 为白，否则黑），
                  再叠 i + locked + 18 用 accent[6 - 2*!fdark] 上色
    之前不管什么主题都画 _f 的两层，所以经典主题的侧边栏图标是 Fluent 的样子。 */
+/* 【控件可交互性判定 —— 对照 GML 的 `window = 0 && sb_drag = -1 && !instance_exists(obj_menu)`】
+   GML 里每一个图标/标签/图层面板按钮的命中条件都是这个组合：
+     draw_icon.gml:20        (mouse_rectangle(...) && (window = 0 || iswindow) && locked = 0 && sb_drag = -1)
+     draw_layericon.gml:14   (mouse_rectangle(...) && window = 0 && locked = 0 && sb_drag = -1)
+     draw_macroicon.gml:14   (mouse_rectangle(...) && window = 0 && locked = 0 && sb_drag = -1)
+     draw_tab.gml:9          (mouse_rectangle(...) && window = 0 && sb_drag = -1)
+   三个条件缺一不可：
+     · window = 0   —— 完全没有任何窗口/拖拽状态（不能用 !isDialogWindow 代替，
+                       见 pianoInputOpen 的说明：拖拽态会让 isDialogWindow 返回 false）
+     · sb_drag=-1   —— 正在拖滚动条时不响应（否则拖滚动条掠过图标会误触）
+     · obj_menu     —— 菜单展开时下层控件不响应
+   我们之前三处都只写了 !isDialogWindow(S.window)，既漏了 sb_drag 也漏了菜单门控。
+   统一收敛到这个函数，避免以后再逐处漏。 */
+function controlInteractive(extra) {
+  if (S.window !== 0) return false;
+  if (UI.dragHeld) return false;
+  if (UI.menu) return false;
+  if (typeof SB !== 'undefined' && SB.drag && (SB.drag[0] !== -1 || SB.drag[1] !== -1)) return false;
+  return extra === undefined ? true : !!extra;
+}
+
 function layerIcon(n, x, y, pressed, tip) {
-  const hover = mouseRectangle(x, y, 16, 16) && !isDialogWindow(S.window);
+  const hover = mouseRectangle(x, y, 16, 16) && controlInteractive();
   if (hover) { G.cursor = 'pointer'; popupSet(x, y, 16, 16, tip); }
   // 对照源码 `a = 鼠标在矩形内`；a 再叠加「按下或刚松开」，按下时偏移 (a=2||pressed)?1:0
   const a = hover ? 1 : 0;
@@ -2592,7 +3163,20 @@ function toggleTopMenu(name, x, y, openFn) {
 }
 
 function drawIcon(i, x, y, tip, locked, pressed) {
-  const hover = !locked && mouseRectangle(x, y, 25, 25) && !isDialogWindow(S.window);
+  /* 【拖拽进行中，顶栏按钮一律不响应】
+     用户报："在画布上按住左键拖动到顶部，选区虽然可以选，
+     但只要一松手就会触发鼠标所在位置顶部的按钮。"
+     根因：drawIcon 是所有顶栏图标按钮的统一入口，它返回 `hover && G.mbr[0]`，
+     而拖选过程中 S.window 是 0 或 W_DRAGSELECTION（都不是 dialog），
+     于是鼠标掠过 / 在按钮上松手，按钮就把这次"松开"当成一次点击。
+     一次按住只应该有一个操作对象，所以拖拽期间这些按钮既不画 hover 高亮、
+     也不返回点击（同时不给 pointer 光标，避免"看起来能点"的误导）。 */
+  const blockedByDrag = !!UI.dragHeld;
+  /* 门控统一到 controlInteractive()：GML draw_icon.gml:20 要求
+     `(window = 0 || iswindow) && locked = 0 && sb_drag = -1`。
+     早先只写了 !isDialogWindow(S.window)，漏了 sb_drag（拖滚动条时会误触图标）
+     和菜单门控（菜单展开时图标仍会响应）。 */
+  const hover = !locked && mouseRectangle(x, y, 25, 25) && controlInteractive();
   if (hover) G.cursor = 'pointer';
   popupSet(x, y, 25, 25, tip);
   /* 对照 draw_icon.gml:20-29 —— 每个图标按钮都有一块【按主题分派的底板】：
@@ -2618,7 +3202,8 @@ function drawIcon(i, x, y, tip, locked, pressed) {
   // 按主题分派图集（Fluent 与非 Fluent 是两套完全不同的图标，不能混用）
   drawToolIcon(i, x, y, pressed);
   setAlpha(1);
-  return !locked && hover && G.mbr[0];
+  // 拖拽期间不返回点击（见函数开头的说明）
+  return !blockedByDrag && !locked && hover && G.mbr[0];
 }
 
 function drawTopBar() {
@@ -2674,7 +3259,7 @@ function drawTopBar() {
     const w = textWidth(label) + 14;
     const x = tabx; tabx += w;
     tabX[label] = x;
-    const hover = mouseRectangle(x, 1, w, 18) && !isDialogWindow(S.window);
+    const hover = mouseRectangle(x, 1, w, 18) && controlInteractive();
     const active = UI.menu && UI.menu.name === name;
     const a = (hover && G.mb[0]) || active ? 2 : 0;
     const tabDark = (S.theme === 3 && S.fdark) ? 6 : 0;
@@ -2829,7 +3414,10 @@ function drawTopBar() {
   roundRect(xx, rowY + 10, xx + volW * S.mastervol, rowY + 13, 2, true);
   setColor(C.accent);
   c.beginPath(); c.arc(xx + volW * S.mastervol, rowY + 11.5, 5, 0, Math.PI * 2); c.fill();
-  if (mouseRectangle(xx - 11, rowY, volW + 22, 22) && !isDialogWindow(S.window)) {
+  /* 缓存音量条矩形，供下一帧帧首判定 volume_scroll（见 editorFrame 里的说明）。
+     必须无条件缓存（而不是只在命中时），否则指针移出后 rect 会一直停在旧值。 */
+  S.volbar_rect = { x: xx - 11, y: rowY, w: volW + 22, h: 22 };
+  if (mouseRectangle(xx - 11, rowY, volW + 22, 22) && controlInteractive()) {
     G.cursor = 'pointer';
     popupSet(xx - 11, rowY, volW + 22, 22, '主音量：' + Math.round(S.mastervol * 100));
     if (G.mb[0]) S.mastervol = clamp((G.mouse.x - xx) / volW, 0, 1);
@@ -2847,7 +3435,7 @@ function drawTopBar() {
 }
 
 function insIcon(index, x, y, selected, collapse) {
-  const hover = mouseRectangle(x, y, 25, 25) && !isDialogWindow(S.window);
+  const hover = mouseRectangle(x, y, 25, 25) && controlInteractive();
   if (hover) G.cursor = 'pointer';
   if (collapse) {
     drawToolIcon(ICON.INSBOX_COLLAPSE, x, y, false);
@@ -2919,7 +3507,7 @@ function drawCompatibility() {
   const compx = Math.max(120, textWidth(label) + 60);
   const hitX = narrow ? (iconR - iconSize * 2 - 4) : (rw - compx);
   const hitW = narrow ? (iconSize * 2 + 4) : compx;
-  if (mouseRectangle(hitX, top, hitW, iconSize + 6) && !isDialogWindow(S.window)) {
+  if (mouseRectangle(hitX, top, hitW, iconSize + 6) && controlInteractive()) {
     G.cursor = 'pointer';
     popupSet(hitX, top, hitW, iconSize + 6, S.compatible === 1 ? '此歌曲兼容 schematic 和数据包。' : (S.compatible === 2 ? '此歌曲仅兼容数据包。' : '此歌曲仅兼容带资源包的数据包。'));
     if (G.mbp[0]) { S.playing = 0; S.window = W_COMPATIBILITY; }
@@ -3011,23 +3599,40 @@ function drawInfoBoxes() {
   drawSprite('spr_tempobox', tboxFluent + tboxDark, 184, ty(57));
   setFont(FONT.small());
   setColor(C.text);
-  text(240, ty(61), floor(S.marker_pos / (S.timesignature * 4)) + 1, 'right');
-  text(232, ty(61), '.');
+  /* 【三段顺序必须与原版一致 —— 之前整组写反了】
+     对照 control_draw.gml:2267-2272（全部 fa_right，从左到右）：
+       210  floor(marker_pos/(timesignature*4)) + 1   ← 小节
+       215  "."
+       225  floor((marker_pos/4) mod timesignature) + 1  ← 拍
+       230  "."
+       240  floor(marker_pos mod 4) + 1   ← 十六分
+     即「小节.拍.十六分」，例如第 3 小节第 2 拍第 1 个十六分显示 3.2.1。
+     之前把小节放在 240、十六分放在 210，视觉上就成了「十六分.拍.小节」，
+     读数语义完全颠倒（显示 1.2.3）。 */
+  text(210, ty(61), floor(S.marker_pos / (S.timesignature * 4)) + 1, 'right');
+  text(215, ty(61), '.');
   text(225, ty(61), floor((S.marker_pos / 4) % S.timesignature) + 1, 'right');
-  text(217, ty(61), '.');
-  text(210, ty(61), floor(S.marker_pos % 4) + 1, 'right');
+  text(230, ty(61), '.');
+  text(240, ty(61), floor(S.marker_pos % 4) + 1, 'right');
   popupSet(184, ty(57), 64, 22, '歌曲的进度（小节.拍.十六分）');
 
   // 速度框
   const useBpm = S.use_bpm;
-  /* 对照 control_draw.gml:2279-2283 —— BPM 模式用帧 1，t/s 模式用帧 0
-     （都再叠加 Fluent/深色的偏移）。 */
-  drawSprite('spr_tempobox', (useBpm ? 1 : 0) + tboxFluent + tboxDark, 108, ty(57));
+  /* 对照 control_draw.gml:2277-2293：
+     :2277  全部 fa_center
+     :2279  BPM 模式框画在 **x = 101**
+     :2282  t/s 模式框画在 **x = 108**
+     :2290/2293  框内文字中心在 **136**、基线 y = 60
+     原版让 BPM 框左移 7px，是因为 "123.45 BPM" 比 "12.34 t / s" 宽，
+     左移一点避免文字超出框边。之前两种模式都画在 108、文字画在 140，
+     切到 BPM 时框与文字整体偏右，长数值更容易溢出框外。 */
+  const tboxX = useBpm ? 101 : 108;
+  drawSprite('spr_tempobox', (useBpm ? 1 : 0) + tboxFluent + tboxDark, tboxX, ty(57));
   setFont(FONT.small());
   setColor(C.text);
   const bpm = S.tempo * 15;
-  text(140, ty(61), useBpm ? bpm.toFixed(2) + ' BPM' : S.tempo.toFixed(2) + ' t / s', 'center');
-  popupSet(108, ty(57), 64, 22, useBpm ? '歌曲的速度（拍数/分钟）\n拖拽来大致更改，点击来手动输入，右键查看更多选项。'
+  text(136, ty(61), useBpm ? bpm.toFixed(2) + ' BPM' : S.tempo.toFixed(2) + ' t / s', 'center');
+  popupSet(tboxX, ty(57), 64, 22, useBpm ? '歌曲的速度（拍数/分钟）\n拖拽来大致更改，点击来手动输入，右键查看更多选项。'
     : '歌曲的速度（红石刻/秒）\n拖拽来大致更改，点击来手动输入，右键查看更多选项。');
   setFont(FONT.main());
   /* 正在手动输入速度时用强调色描一圈，作为「这个框处于编辑态」的提示。
@@ -3036,11 +3641,23 @@ function drawInfoBoxes() {
     setColor(C.accent);
     roundRect(108.5, ty(57.5), 171.5, ty(78.5), 4, false);
   }
-  if (mouseRectangle(108, ty(57), 64, 22) && !isDialogWindow(S.window)) {
+  /* 【拖拽进行中，速度滑块完全不响应】
+     用户报："在画布上按住左键选区，此时如果刚好碰到了那个速度滑块，
+     又会开始一边选区一边改变速度，全乱套了。"
+     根因：这里只判了 `!isDialogWindow(S.window)`，而拖选区时
+     S.window 是 0 或 W_DRAGSELECTION（后者在 TRANSIENT_WINDOWS 里，
+     isDialogWindow 对它返回 false）—— 两种都放行，于是滑块照样收按下。
+     一次按住只应该有一个操作对象，所以拖拽期间整个滑块既不响应
+     按下拖动、也不响应留言/右键菜单。UI.dragHeld 由 editorFrame 计算，
+     判据是拖拽状态变量（不依赖 G.mb[0]，见那边的说明）。 */
+  if (mouseRectangle(108, ty(57), 64, 22) && controlInteractive()) {
     G.cursor = 'pointer';
     if (G.mbr[0]) { S.window = W_SETTEMPO; focusText(64, String(S.tempo)); UI.inputWindow = W_SETTEMPO; UI.textEnter = () => commitTempo(); }
     if (G.mb[0] && (G.mouse.x !== S._mx || G.mouse.y !== S._my) && !S.tempoDrag) {
       S.tempoDrag = { y: G.mouse.y, v: S.tempo };
+      /* 一按下就登记"速度滑块进入拖动"，让它在本帧以及松手那一帧
+         都被算进 UI.dragHeld（见下面 UI.tempoDragged 的说明）。 */
+      UI.tempoDragged = true;
     }
     if (G.mbp[2]) openTempoMenu();
   }
@@ -3049,6 +3666,7 @@ function drawInfoBoxes() {
     S.tempo = median(0.25, S.tempoDrag.v + d, 60);
     S.tempo = floor(S.tempo * 4) / 4;
     S.changed = 1;
+    UI.tempoDragged = true;
   }
   if (!G.mb[0]) S.tempoDrag = null;
   S._mx = G.mouse.x; S._my = G.mouse.y;
@@ -3074,11 +3692,65 @@ function openTempoMenu() {
 }
 
 /* ---------------------------------------------------------------- 钢琴 */
+/* 【钢琴的输入闸门 —— 对照 draw_piano.gml:25 / :61 的 `window = 0`】
+   GML 里钢琴每一处命中判定都写着 `if (window = 0 && mouse_rectangle(...))`，
+   要求【完全没有任何窗口状态】才响应。我们移植时写成了
+   `!isDialogWindow(S.window)`，这两者【并不等价】：
+     isDialogWindow(w) = (w !== 0 && TRANSIENT_WINDOWS.indexOf(w) < 0)
+   而 TRANSIENT_WINDOWS 里装的正是拖拽状态：
+     W_RELEASE / W_DRAG / W_DRAGMARKER / W_DRAGSELECTION / W_DRAGVOL /
+     W_DRAGSTEREO / W_DRAGSECTION_START / W_DRAGSECTION_END / W_DRAGTEMPO / W_INSBOX
+   所以拖选区时 S.window = W_DRAGSELECTION(24) → isDialogWindow 返回 false
+   → 钢琴【照样判定命中】。这就是用户报的
+   "在画布上按住左键拖动到钢琴，竟然也能按到钢琴"。
+   （也解释了为什么只有部分键会响：drawPiano 里只有 overWhite 那一处
+     加了 !UI.dragHeld，overBlack 和 else 分支没加，而拖拽时 UI.dragHeld
+     又因为长按逻辑可能失效 —— 两个漏洞叠加，表现就非常零碎。）
+
+   这里直接按 GML 的语义要求 window === 0，并且额外要求没有打开抽屉：
+   抽屉是浮层，覆盖在钢琴上方，它的琴键（drawDrawerPiano）走同一套绘制，
+   但输入应该只由抽屉自己那一份接管。 */
+function pianoInputOpen() {
+  /* 【抽屉打开时必须允许，否则抽屉里的琴键永远点不动】
+     之前这里的注释写着"抽屉是浮层，它的琴键走同一套绘制，
+     但输入应该只由抽屉自己那一份接管"—— 可是抽屉那一份
+     （drawDrawerPiano）调用的是【同一个 drawPiano】，里面所有点击判断
+     读的就是这个函数。于是 drawerOpen() 为真 → 返回 false →
+     抽屉钢琴一个键都点不响，形成自锁。
+     正确做法：抽屉自己的绘制期间把一个临时标志打开，让这段输入成立；
+     抽屉之外的普通钢琴仍然要求 window === 0 且没有拖拽。 */
+  if (typeof drawerOpen === 'function' && drawerOpen()) {
+    return S.drawer_piano_input === 1;
+  }
+  return S.window === 0 && !UI.dragHeld;
+}
+
 function drawPianoAll() {
   const kc = S.dropmode ? 52 : S.keysshow;
   const px = floor(S.rw / 2 - (kc * 39) / 2);
   const py = S.rh - 154;
   drawPiano(px, py, kc, S.totalcols);
+}
+
+/* 钢琴两端渐隐的 alpha 夹紧。
+   对照 draw_piano.gml:119-120：
+     if (a < 3 && alpha < 3) alpha += 1
+     if (a > k - min(5, 54 - (startkey + k))) alpha -= 1
+   alpha 从 max(0, 3 - startkey) 起步，两端各增减 1，正常范围 0..3，
+   而 draw_piano_key.gml:20/23 的遮罩是 `0.8 - alpha / 3`。
+
+   【问题】右端递减没有下限：
+     k=20、startkey=17 时阈值 = 20 - min(5, 54-37) = 20-5 = 15，
+     a=16..19 连减 4 次，alpha 从 3 一路减到 -1。
+     遮罩随之变成 0.8-(-1)/3 = 1.13 → GameMaker 会 clamp 到 1 → 琴键被【完全盖死】。
+     用户看到的就是右侧一整块灰色/空白的假琴键
+     （截图里那个突兀的灰色圆角块就是这个被遮死的键）。
+   GML 没有显式夹紧，但它靠 clamp 的副作用"碰巧"看起来还行；
+   在键数少的横屏窗口里（比如 840px 宽 → 20 键）问题就被放大到无法忽略。
+   这里把 alpha 夹到 [0, 3]：alpha=0 时遮罩是 0.8（淡出但仍看得见琴键轮廓），
+   不会再出现"整块盖死"。这是有意的偏离，理由就是"渐隐不该变成遮挡"。 */
+function clampAlpha(a) {
+  return a < 0 ? 0 : (a > 3 ? 3 : a);
 }
 
 function drawPiano(xx, yy, k, totalcols) {
@@ -3103,7 +3775,7 @@ function drawPiano(xx, yy, k, totalcols) {
       const c2 = S.startkey + S.sharpkeys + b + 1;
       const k1 = S.show_keyboard && S.piano_key[c1] > 0;
       const k2 = S.show_keyboard && S.piano_key[c2] > 0;
-      const overWhite = !isDialogWindow(S.window) && mouseRectangle(xx + 39 * a, yy, 39, 128);
+      const overWhite = pianoInputOpen() && mouseRectangle(xx + 39 * a, yy, 39, 128);
       if (overWhite) {
         const inLeftBlack = mouseRectangle(xx + 39 * a - 12, yy - 7, 25, 71);
         const inRightBlack = mouseRectangle(xx + 39 * a + 27, yy - 7, 25, 71);
@@ -3121,7 +3793,7 @@ function drawPiano(xx, yy, k, totalcols) {
         }
       } else S.key_click[c2] = 0;
       // 黑键命中
-      const overBlack = !isDialogWindow(S.window) && mouseRectangle(xx + 39 * a - 12, yy - 7, 25, 71);
+      const overBlack = pianoInputOpen() && mouseRectangle(xx + 39 * a - 12, yy - 7, 25, 71);
       if (overBlack) {
         if (S.show_notechart && !S.keynames_flat && c1 > 6 && c1 < 70 && !S.playing) drawNoteChart(xx + 39 * a, yy - 32, S.startkey + a - 1, 1);
         if (G.mbp[2] && S.show_keyboard) S.key_edit = c1;
@@ -3142,7 +3814,7 @@ function drawPiano(xx, yy, k, totalcols) {
       if (S.key_press[c2] || S.key_click[c2]) d1 = 0.75;
       // 对照 draw_piano.gml:69 `draw_piano_key(false, xx + 39*a, yy + floor(7*down[1]), ...)`:
       // 白键的下沉偏移【只在这里加一次】，drawPianoKey 内部不再加。
-      drawPianoKey(false, xx + 39 * a, yy + floor(7 * d1), col, keyAlpha, c2, k2, !out && S.show_keynumbers, d1);
+      drawPianoKey(false, xx + 39 * a, yy + floor(7 * d1), col, clampAlpha(keyAlpha), c2, k2, !out && S.show_keynumbers, d1);
       // 黑键
       let out1 = (c1 < 33 || c1 > 57);
       let col1 = '#ffffff';
@@ -3156,16 +3828,17 @@ function drawPiano(xx, yy, k, totalcols) {
       // 黑键只传 yy-7（不含下沉量），下沉量由 drawPianoKey 内部按 floor(7*ispressed) 加。
       // 之前这里写成 yy - 7 + floor(7*d0)，内部又加一次，等于偏移了双倍，
       // 黑键会被整体下移并露出顶部 —— 就是「黑键顶部没被蓝色覆盖」的原因。
-      drawPianoKey(true, xx + 39 * a - 19, yy - 7, col1, keyAlpha, c1, k1, !out1 && S.show_keynumbers, d0);
+      drawPianoKey(true, xx + 39 * a - 19, yy - 7, col1, clampAlpha(keyAlpha), c1, k1, !out1 && S.show_keynumbers, d0);
       if (c1 < pianoKeyLo) pianoKeyLo = c1;
       if (c2 > pianoKeyHi) pianoKeyHi = c2;
       b += 2;
       if (a < 3 && keyAlpha < 3) keyAlpha += 1;
       if (!S.drawer_piano_flat && a > k - Math.min(5, 54 - (S.startkey + k))) keyAlpha -= 1;
+      if (keyAlpha < 0) keyAlpha = 0;
     } else {
       const c1 = S.startkey + S.sharpkeys + b;
       const k1 = S.show_keyboard && S.piano_key[c1] > 0;
-      if (!isDialogWindow(S.window) && mouseRectangle(xx + 39 * a, yy, 39, 128)) {
+      if (pianoInputOpen() && mouseRectangle(xx + 39 * a, yy, 39, 128)) {
         const inBlack = mouseRectangle(xx + 39 * a + 27, yy - 7, 25, 71) && !(a === k - 1 || cc === 1 || cc === 4);
         if (!inBlack) {
           if (S.show_notechart && c1 > 6 && c1 < 69 && !S.playing) drawNoteChart(xx + 39 * a + 18, yy - 32, S.startkey + a, 0);
@@ -3185,7 +3858,7 @@ function drawPiano(xx, yy, k, totalcols) {
       const since = (G.time - S.key_played[c1]) * 1000;
       if (since < 300) { col = mergeColor(col, '#ffff00', 1 - since / 300); d = ((since / 300) * 2); if (d > 1) d = 2 - d; d = floor(d * 3) / 3; }
       if (S.key_press[c1] || S.key_click[c1]) d = 0.75;
-      drawPianoKey(false, xx + 39 * a, yy + floor(7 * d), col, keyAlpha, c1, k1, !out && S.show_keynumbers, d);      b += 1;
+      drawPianoKey(false, xx + 39 * a, yy + floor(7 * d), col, clampAlpha(keyAlpha), c1, k1, !out && S.show_keynumbers, d);      b += 1;
       if (c1 < pianoKeyLo) pianoKeyLo = c1;
       if (c1 > pianoKeyHi) pianoKeyHi = c1;
     }
@@ -3194,6 +3867,7 @@ function drawPiano(xx, yy, k, totalcols) {
     //   if (a > k - min(5, 54 - (startkey + k))) alpha -= 1
     if (a < 3 && keyAlpha < 3) keyAlpha += 1;
     if (!S.drawer_piano_flat && a > k - Math.min(5, 54 - (S.startkey + k))) keyAlpha -= 1;
+    if (keyAlpha < 0) keyAlpha = 0;
   }
   if (selectedkey > -1) { S.selected_key = selectedkey; S.selected_vel = 100; S.selected_pan = 100; S.selected_pit = 0; }
 
@@ -3241,7 +3915,15 @@ function drawPianoKey(isblack, xx, yy, color, alpha, key, showkeybind, showclick
   if (alpha === undefined) alpha = 3;
   // 两端渐隐遮罩：alpha < 3 时叠一层窗口底色
   const mask = (frameNo, yy2) => {
-    if (alpha < 3) drawSprite('spr_piano', frameNo, xx, yy2, 1, 1, C.background, clamp(0.8 - alpha / 3, 0, 1));
+    /* 【alpha = 0 时不画遮罩】
+       对照 draw_piano_key.gml:20/23：`if (alpha < 3) draw_sprite(..., 0.8 - alpha/3)`。
+       alpha 走到 0 时遮罩是 0.8 —— 仍然盖掉 80%，
+       在键数少的横屏窗口里（840px → 20 键，右端 4 个键都会走到 0）
+       看起来就是"右边一整块空白琴键"（用户截图里那两块）。
+       渐隐的本意是"这个音域之外、淡一点"，不是"擦掉"。
+       所以 alpha = 0 时干脆不画遮罩：键仍然完整可见，只是两端不再额外压暗。
+       这是有意偏离 GML 的一处，理由：遮罩不该把琴键抹成空白。 */
+    if (alpha > 0 && alpha < 3) drawSprite('spr_piano', frameNo, xx, yy2, 1, 1, C.background, clamp(0.8 - alpha / 3, 0, 1));
   };
   if (isblack) {
     // Key：先画底部小条，再画上半身（与源码顺序一致）
@@ -3374,7 +4056,17 @@ function drawMsg() {
  *
  * m_key / m_vel / m_pan / m_pit 的编号见 song.js 顶部的常量（0..3）。 */
 function modeAction(n) {
-  if (S.selected === 0) return 0;
+  /* 【不能在这里用「空选区」提前返回 —— 对照 mode_action.gml:6-7】
+     GML 一进函数就 `changed = 1`，完全没有 selected 守卫；
+     case 5/6/7 的设定窗口照常打开，由窗口自己判断：
+         draw_window_macro_setvelocity.gml:4-7
+             if (selected = 0) { window = 0 return 0 }
+     也就是原版会「弹一下然后立刻自关」，但 changed 已经置位。
+     我们之前在函数口 `if (S.selected === 0) return 0;`，
+     于是右键菜单的「设定音量…/设定音符声道…/设定音高…」
+     以及 Ctrl+T / Ctrl+G 在无选区时点了毫无反应。
+     case 1..4 的 selection_change* 在空选区时本来就是空操作，无需额外保护。 */
+  S.changed = 1;
   const mode = S.editmode | 0;
   if (mode === 0) {                       // m_key：音高
     if (n === 1) return selectionChangeKey(12);
