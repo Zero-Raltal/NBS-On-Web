@@ -2103,7 +2103,18 @@ function drawLayersPanel() {
     // 把 1px 的偏移当成了 10px，右侧图标被整体左移了 9px，
     // 于是第 6 个图标被挤出侧栏而被裁掉（用户看到「只显示到第 2 个」就是这个原因）。
     // 另外 icon6（下移）在 GML 里还有 `- (startb+b = 0) * 8`，第一层时再左移 8。
-    const off = (S.realvolume ? 0 : 1) + (S.realstereo ? 0 : 10);
+    /* 逐项对照 GML 的 `x1 + (126 + 18*n) - !realvolume - realstereo*10`：
+         · `!realvolume`：音量图标【隐藏】时右侧图标左移 1px 补位 → off 含 (realvolume?0:1) ✓
+         · `realstereo*10`：这里最容易看反。realstereo 是「关闭立体声」开关
+           （见 draw_window_preferences.gml:583 的复选框文案），
+           而立体声图标的绘制条件是 `if (!realstereo)`。
+           所以 realstereo = 1（关闭）→ 图标不画 → 右侧图标左移 10px；
+           realstereo = 0（显示）→ 图标占位 → 不左移。
+           也就是偏移量 = realstereo * 10，而不是 (realstereo ? 0 : 10)。
+           之前写反了：默认设置（realstereo=0，图标可见）反而左移 10px，
+           7 个按钮整体压到立体声图标上；把「关闭立体声」勾上后按钮又跳回右边。
+           这就是侧栏按钮位置「忽左忽右」的原因。 */
+    const off = (S.realvolume ? 0 : 1) + (S.realstereo ? 10 : 0);
     const iy = ly + 8;
     const lockOn = layer < S.endb2 && S.layerlock[layer] === 1;
     const soloOn = layer < S.endb2 && S.layerlock[layer] === 2;

@@ -566,9 +566,33 @@ function removeLayer(index, undo) {
   if (!undo) historySet(H_REMOVELAYER, snapshot);
 }
 function shiftLayers(from, to, undo) {
-  if (to < 0 || to >= S.endb2) return;
+  /* 对照 shift_layers.gml:9-17：
+       if (l1 >= endb2 || l2 >= endb2) { endb2 += 1; layername[endb2] = ""; ... }
+     原版在越界时【扩容一层】而不是拒绝操作 —— 也就是「把最下面一层继续下移」
+     会新开一层，把内容挪到新层上。我们之前是 `if (to >= S.endb2) return;`，
+     于是最底层的下移按钮点了毫无反应，而上移按钮又会画在 layer>0 的条件里，
+     上下两个按钮的行为不对称，这就是「规律搞不懂」的一部分来源。 */
+  if (to < 0) return;
+  if (to >= S.endb2) {
+    const need = to + 1;
+    while (S.endb2 < need) {
+      const lb = S.endb2;
+      growRowArrays(lb + 2);
+      S.layername[lb] = ''; S.layerlock[lb] = 0;
+      S.layervol[lb] = 100; S.layerstereo[lb] = 100; rowamount[lb] = 0;
+      S.endb2 = lb + 1;
+    }
+  }
   growRowArrays(S.endb2 + 2);
   const a = Math.min(from, to), b = Math.max(from, to);
+  /* 独奏字符串的同步必须用【交换前】两个层的 lock 值 —— 对照
+     shift_layers.gml:19-23，这段 `if (layerlock[l1] = 2 ^^ layerlock[l2] = 2)`
+     写在「Store first layer」之前，读的是原始值。
+     （我第一版在交换之后才判断，那时 layerlock[a] 已经是 b 的旧值、
+     layerlock[b] 已经是 a 的旧值，两边比的是同一份数据，条件恒为假，
+     solostr 永远不更新。）
+     `^^` 是异或：只有恰好一层在独奏时才需要改，两层都独奏或都不独奏都不用动。 */
+  const lockA0 = S.layerlock[a], lockB0 = S.layerlock[b];
   // 交换 a、b 两层
   const tmps = [S.layername[a], S.layerlock[a], S.layervol[a], S.layerstereo[a], rowamount[a]];
   S.layername[a] = S.layername[b]; S.layerlock[a] = S.layerlock[b];
@@ -584,6 +608,21 @@ function shiftLayers(from, to, undo) {
     S.grid.exists[ib] = ex; S.grid.ins[ib] = ins; S.grid.key[ib] = k;
     S.grid.vel[ib] = v; S.grid.pan[ib] = p; S.grid.pit[ib] = pt;
   }
+  /* layerlock 跟着层一起交换了（独奏标记换到新位置），但 solostr 里记的是
+     【层号字符串】，不同步的话 lockedLayerOf() 会按旧的层号判断独奏，
+     独奏就作用在了另一层上 —— 表现是「上下移之后，声音的层突然变了」。 */
+  if ((lockA0 === 2) !== (lockB0 === 2)) {
+    if (lockA0 === 2) S.solostr = S.solostr.split('|' + a + '|').join('|' + b + '|');
+    else S.solostr = S.solostr.split('|' + b + '|').join('|' + a + '|');
+  }
+  /* endb 必须重算。它是「有内容的最下面一层」，渲染循环写的是
+     `for (b = 0; b <= S.endb; b++)`，一旦内容被移到 endb 之外，
+     音符数据还在、但根本不会被画出来 —— 这就是用户说的
+     「下移之后音符莫名其妙没了」。之前只有 addLayer / removeLayer 维护它，
+     shiftLayers 完全没碰，所以把内容往下移会丢、往上移不会。 */
+  let eb = S.endb2 - 1;
+  while (eb >= 0 && rowamount[eb] === 0) eb--;
+  S.endb = Math.max(0, eb);
   S.changed = 1;
   if (!undo) historySet(H_SWAPLAYER, to, from);
 }
