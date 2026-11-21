@@ -1901,9 +1901,31 @@ function drawDrawer() {
   // ---- 抽屉本体 ----
   const ph = Math.min(DRAWER_PANEL_H, floor(rh * 0.55));
   const py = ty - ph;
-  // 抽屉打开时，把抽屉区域之外的点击当作"点到遮罩"→ 收起
-  const inPanel = mouseRectangle(0, py, rw, ph);
-  if (!inPanel && G.mbp[0] && !isDialogWindow(S.window)) {
+  /* 【点抽屉外的灰色遮罩 → 收起抽屉】
+     这里踩的是和底部标签、抓手条同一个坑，但更隐蔽：
+       · 抽屉打开时 drawerOpen() 为真，editorFrame 在 219 行把 blocked 置 true，
+         紧接着 226 行把 G.mb / G.mbp / G.mbr 全部清零；
+       · drawDrawer() 是在 drawEditor() 内部被调用的，而 G.mb=rawMb 的恢复
+         在 248 行 —— 也就是【恢复之前】。所以这里读到的 G.mbp[0] 恒为 false，
+         遮罩点击永远不触发，点上去毫无反应。
+     正确做法是读 UI.rawMbp / UI.rawMbr（清零前的原始快照），
+     和标签栏用 UI.rawMbr、抓手条用 UI.rawMbr 完全一致。
+
+     命中范围必须是【遮罩实际画出来的那片矩形】，也就是
+       fillRect(0, S.y1 - 4, rw, py - (S.y1 - 4))      —— 面板以上、顶栏以下。
+     早先写成 `!inPanel`（"只要不在面板里"）太宽了：顶部菜单栏、工具栏、
+     甚至状态栏都会落进去，点那些地方也会把抽屉关掉。
+     现在严格用 inScrim 判定，保证"只有看得见的灰色区域才能点"。 */
+  const scrimTop = S.y1 - 4;
+  const scrimH = Math.max(0, py - scrimTop);
+  const inScrim = scrimH > 0 && mouseRectangle(0, scrimTop, rw, scrimH);
+  const mbpScrim = (UI.rawMbp || G.mbp);
+  const mbrScrim = (UI.rawMbr || G.mbr);
+  /* 按【下】和【抬】都接受：
+     · 按下即收 —— 点遮罩立刻有反馈，不用等抬手；
+     · 抬手也收 —— 手指从面板里滑到遮罩上再松开（常见操作）也能收起。
+     两者都要求指针落在遮罩矩形内，且当前没有对话框抢焦点。 */
+  if (inScrim && !isDialogWindow(S.window) && (mbpScrim[0] || mbrScrim[0])) {
     S.drawer = ''; UI.swallowPress = true;
     return;
   }
