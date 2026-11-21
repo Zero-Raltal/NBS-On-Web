@@ -1083,7 +1083,14 @@ function drawPreferencesBody() {
       if (G.mbp[0]) {
         let s = '';
         for (const [v, label] of THEMES) s += (S.theme === v ? '+ ' : '') + label + '|';
-        showMenu('theme', bx, by + bh, s);
+        /* 这里 (bx, by+bh) 是【设计坐标】（以窗口左上角为原点），
+           而 drawMenu 画在屏幕空间 —— 必须经 dlgToScreen() 换算。
+           漏了这一步，菜单就会按设计坐标的小数值画到窗口左上角附近，
+           也就是用户说的「主题下拉框的列表飞到左上角」。
+           同文件里 instruments_press / instruments_pitch 两个下拉框
+           本来就做了换算，只有这一处漏了。 */
+        const sp = dlgToScreen(bx, by + bh);
+        showMenu('theme', sp.x, sp.y, s);
       }
     }
     if (drawCheckbox(ox + 40, oy + 130, !!S.fdark, '暗色模式', S.theme !== 3)) {

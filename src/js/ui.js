@@ -1030,7 +1030,12 @@ function drawMenu() {
       c.restore();
     } else {
       setColor(C.menuBg);
-      fillRect(dx, dy, dx + mi.w, dy + mi.h);
+      /* fillRect 的签名是 (x, y, w, h) —— 宽高，不是右下角坐标。
+         这里之前写成 fillRect(dx, dy, dx + mi.w, dy + mi.h)，
+         宽被放大成 dx+mi.w、高被放大成 dy+mi.h，于是背景块比菜单本身
+         大出一整圈（并向右下溢出），看着就是"背景大小严重错位"。
+         三条 fillRect 全都有这个问题。 */
+      fillRect(dx, dy, mi.w, mi.h);
     }
     /* 外框：对照 menu_draw.gml:50-54 —— 颜色是 draw_theme_color()（强调色）0.25 alpha，
        且同样分直角/圆角。这里用强调色低透明度还原。 */
@@ -1046,10 +1051,13 @@ function drawMenu() {
       c.save();
       c.globalAlpha = c.globalAlpha * 0.25;
       setColor(T.accent[3]);
-      fillRect(dx + 29, dy + 3, dx + 29 + 1, dy + mi.h - 3);
+      /* 同理：fillRect(x, y, w, h)，宽高必须是 1 和 (mi.h - 3)。
+         原来传的是 dx+29+1 和 dy+mi.h-3，竖线会被拉成一根粗细和长度
+         都跟坐标成正比的大色块。 */
+      fillRect(dx + 29, dy + 3, 1, mi.h - 3);
       c.restore();
       setColor('#ffffff');
-      fillRect(dx + 30, dy + 3, dx + 30 + 1, dy + mi.h - 3);
+      fillRect(dx + 30, dy + 3, 1, mi.h - 3);
     }
 
 
