@@ -1034,25 +1034,22 @@ function touchFireLongPress() {
     if (typeof SB !== 'undefined' && SB.hold !== undefined) { SB.hold = -2; SB.drag[0] = -1; SB.drag[1] = -1; }
   }
 
-  /* 【到点就弹菜单，不等松手】
-     用户报："长按画布空白部分，竟然要松手之后才能弹出右键菜单，
-     用起来感觉很奇怪"。
-     原来这里只投递 mbp[2]，菜单要等 touchPointerUp 投递 mbr[2] 之后才弹
-     （handleGridInput 的右键分支是 `if (G.mbr[2]) ... openEditContextMenu()`）。
-     桌面鼠标右键"按下记录、松手弹菜单"是合理的（因为要区分点击与拖动），
-     但触摸长按本身就是"持续按住"的手势，到点即弹才符合直觉。
-     所以这里直接把菜单弹出来，并标记 menuFired，松手时不再重复处理。
-     注意不投递 mbp[2]：那条路径会走"右键点到音符就删除"，
-     触屏长按的意图是"对这个位置/选区开菜单"，不是删除。 */
+  /* 【到点就投递真正的右键按下，后续全交给 GML 的右键逻辑】
+     对照 control_draw.gml:583-605（右键按下）与 :604+（右键松手）：
+       按下：该格有音符 → remove_block_manual() 删掉，并 select_pressx = -1
+       松手：若 (starta+sela = select_pressa && startb+selb = select_pressb
+             && select_pressx != -1 && !ctrl) → 弹 editext 菜单
+     于是天然得到用户要的三种行为：
+       · 长按空白处       → 没东西可删，松手时弹右键菜单
+       · 长按未选中的音符 → 删掉该音符，select_pressx 置 -1 → 不弹菜单
+       · 长按已选中的音符 → 删掉该音符，但选区仍在同一位置 →
+                            starta+sela 相等 → 松手弹菜单
+     这套语义是原版右键的既有实现，不该另写一份，否则必然出偏差。
+     （上一版我改成"到点直接 openEditContextMenu()、不投递右键"，
+       结果长按音符不再删除 —— 那是用户明确要保留的行为，现已改回。） */
   G.mouse.x = p.x; G.mouse.y = p.y;
-  S.rightPress = null;
-  if (typeof openEditContextMenu === 'function') {
-    openEditContextMenu();
-    p.menuFired = true;
-  } else {
-    // 兜底（不应发生）：退回老的"投递右键、松手弹菜单"路径
-    G.mb[2] = true; G.mbp[2] = true;
-  }
+  G.mb[2] = true; G.mbp[2] = true;
+  p.rightFired = true;
 
   if (navigator.vibrate) { try { navigator.vibrate(12); } catch (_) { } }
 }
@@ -1242,24 +1239,16 @@ function touchPointerUp(e) {
 
   if (!p) return;
   if (p.longFired) {
-    /* 长按路径结束。
-       菜单已经在 touchFireLongPress() 里弹出来了（menuFired），
-       这里只做清理，【不再投递 mbr[2]】——
-       否则 handleGridInput 的右键松手分支会再走一次
-       `if (S.rightPress && !moved && !removed) openEditContextMenu()`，
-       在一个已经打开菜单的帧上重建菜单，表现为"菜单闪一下"。
-       同时确保三个鼠标键位都是干净的：
-       长按过程中可能残留 G.mb[0]（按在选区上时 touchPointerDown 投递过），
-       不清掉的话选区会一直卡在"拖动中"。 */
+    /* 长按路径结束：投递右键松手，交给 handleGridInput 的右键分支收尾
+       （对照 control_draw.gml:604+ —— 是否弹菜单完全由它判断，
+        我们这里不做任何决策，避免和原版语义跑偏）。
+       同时清零左键三态：长按过程中 G.mb[0] 可能还是 true
+       （按在浮动选区上时 touchPointerDown 投递过），
+       不清掉选区会一直卡在"拖动中"，用户下一次点击就会把选区搬走。 */
     G.mb[0] = false; G.mbp[0] = false; G.mbr[0] = false;
-    G.mb[2] = false; G.mbp[2] = false; G.mbr[2] = false;
-    if (!p.menuFired) {
-      /* 兜底：菜单没能弹出（openEditContextMenu 不存在等），
-         仍按老路径投递一次右键松手，让 handleGridInput 去弹。 */
-      G.mbr[2] = true;
-    }
-    S.rightPress = null;
-    if (S.window === W_DRAGSELECTION) S.window = 0;
+    G.mbp[2] = false;
+    G.mb[2] = false;
+    G.mbr[2] = true;
     return;
   }
   if (p.panned) { G.mb[0] = false; return; }
@@ -12132,10 +12121,40 @@ function computeLayout() {
     S.rhval = 270;
     if (!S.show_piano) S.rhval = 130;
     if (S.fullscreen) S.rhval = 32;
-    S.totalrows = floor((rh - S.rhval) / 32);
+    /* 【totalrows 只扣"顶栏折行多出来的那部分"，其余严格照 GML】
+       对照 control_draw.gml:183-190：
+           rhval = 270（显示钢琴时）/ 130（不显示）/ 32（全屏）
+           totalrows = floor((rh - rhval) / 32)
+       rhval 这 270/130 本身已经把顶栏的高度算进去了（y1 = 52 也在其中），
+       原版顶栏是【固定单行】，所以这个常量永远成立。
+       我们的顶栏在窄屏会折行、展开音色盒还会再多占几行，
+       此时 rhval 的隐含假设就破了：不扣掉多出来的高度，网格底部会溢出屏幕。
+       所以这里扣 (toolbar_h - 52) —— 【顶栏为 52 时这一项是 0】，
+       宽屏布局与 GML 逐像素完全一致；只有在折行/展开时才相应减少行数。 */
+    const extraTop = Math.max(0, (S.toolbar_h || 52) - 52);
+    S.totalrows = floor((rh - S.rhval - extraTop) / 32);
     if (S.fullscreen) S.totalrows += 1;
     S.x1 = (!S.fullscreen && S.show_layers) ? 264 : -2;
-    S.y1 = S.fullscreen ? -2 : 52;
+    /* 【桌面分支的 y1 也要跟随顶栏折行，但宽屏下必须仍是 52】
+       用户报："页面宽度小的时候音色栏会有一个展开按钮，点击展开之后，
+       结果把后面的控件也弄到下一行去了，导致这些控件飘在错误的位置。"
+
+       根因：顶栏在窄屏下会【折行】，展开音色盒会让它再多占几行，
+       drawTopBar 末尾（见该函数结尾）把实测高度写进 S.toolbar_h：
+         窄屏 900x800：收起 52 → 展开 152
+       但竖屏分支（上面那份）读 `S.toolbar_h + S.info_h` 来算 y1，
+       桌面分支却把 y1 写死成 52 —— 于是：
+         · 顶栏实际长到 152 高，网格起点仍是 gy=86；
+         · 音色盒（4 行 × 25 = 100 高）与后面的工具图标
+           全部压在网格上面，看起来就是"控件飘到了错误的位置"；
+         · 后续控件也被排到 y=93~152 一带，与音色盒图标互相重叠，
+           点哪个都可能先命中音色。
+       修法：y1 = 52 + (toolbar_h - 52) = toolbar_h。
+       【用"多出来的量"而不是直接拿 toolbar_h 顶替】
+       这样顶栏为 52 时结果严格等于原版的 y1 = 52，
+       宽屏布局逐像素不变，只有折行时才往下推。 */
+    const extraTop2 = Math.max(0, (S.toolbar_h || 52) - 52);
+    S.y1 = S.fullscreen ? -2 : (52 + extraTop2);
   }
   if (S.totalrows < 1) S.totalrows = 1;
 
@@ -13036,11 +13055,8 @@ function handleDragAutoscroll() {
     S.window === W_DRAGSECTION_END || S.select > 0);
   if (!dragging) {
     /* 不在拖拽状态时把四个累加量归零，下次越界从慢速重新起步。
-       （GML 是靠 else 分支每条各自清零，效果等价。）
-       dragscroll_a/b 是"本次拖拽累计滚了多少"，同样必须在拖拽结束时清零，
-       否则下一次拖拽一开始就会莫名其妙地往回退。 */
+       （GML 是靠 else 分支每条各自清零，效果等价。） */
     S.dragincxr = 0; S.dragincxl = 0; S.dragincyd = 0; S.dragincyu = 0;
-    S.dragscroll_a = 0; S.dragscroll_b = 0;
     return;
   }
   const gx = S.gx, gy = S.gy;
@@ -13077,50 +13093,13 @@ function handleDragAutoscroll() {
   S.starta = median(0, S.starta, Math.max(0, S.enda));
   S.startb = median(0, S.startb, Math.max(0, S.endb));
 
-  /* 【自动滚屏必须可逆 —— 否则"拖得出去、拖不回来"】
-     用户报："框选音符之后上下拖动有的时候会受到阻碍，感觉像是被什么东西卡住了。"
-     实测（触摸，30 层歌曲）：往网格下方拖 → 越界触发自动滚屏，
-     startb 从 0 一路涨到 44；但只要不是贴到【上边缘】(gy+32)，
-     往回拖时上面那两个 else 分支只是把累加量清零，startb 一动不动。
-     于是选区被永久"钉"在下面，怎么拖都回不到原位。
-
-     GML 里没有这个问题，是因为它假定【鼠标出不了游戏窗口】：
-     越界最多溢出一两格，往回拖时指针立刻回到 gy+32 以内就能反向滚。
-     网页端指针可以拖到钢琴、状态栏、甚至屏幕外，滚出去的量远大于原版，
-     这个"只能单向滚"的缺陷就被放大成"卡住"。
-
-     修法：记录本次拖拽累计滚了多少（dragscroll_a/b，带符号），
-     当指针回到网格内侧、且不再贴近任何边缘时，按与前进相同的步长
-     把它逐帧"退回去"（同样上限 4 格/帧，所以退得和进一样快）。
-     这样拖回来时视图跟着回退，选区自然回到原位，手感是连续的。
-
-     【为什么必须让视图回退，而不是只让选区动】
-     实测：往下拖越界后 startb 从 0 涨到 43，选区落在歌曲第 45 行。
-     指针拖回网格第 2 行时，若 startb 仍是 43，
-     则 selection_y = 43 + 2 - 0 = 45 —— 永远回不到原来的第 2 行
-     （要让选区回到第 2 行，指针得在视口第 -41 行，物理上不可能）。
-     所以只有把视图一起退回去，选区才可能回到原位。 */
-  const dA = S.starta - a0, dB = S.startb - b0;
-  if (dA) S.dragscroll_a = (S.dragscroll_a || 0) + dA;
-  if (dB) S.dragscroll_b = (S.dragscroll_b || 0) + dB;
-
-  /* 判据用"严格在网格内侧"：贴边（< gy+32 或 > 底边）时仍属主动滚动区，
-     不能同时又进退回逻辑，否则两股力互相抵消。 */
-  const insideX = G.mouse.x >= gx + 32 && G.mouse.x <= gx + 32 * totalcols - 32;
-  const insideY = G.mouse.y >= gy + 32 && G.mouse.y < gy + totalrows * 32;
-  if (insideX && S.dragscroll_a) {
-    S.dragincyu = 0;   // 复用步长累加器的思路：退也用同一上限
-    const back = Math.sign(S.dragscroll_a) * Math.min(Math.abs(S.dragscroll_a), 4);
-    const na = median(0, S.starta - back, Math.max(0, S.enda));
-    if (na !== S.starta) { S.dragscroll_a -= (S.starta - na); S.starta = na; }
-    else S.dragscroll_a = 0;   // 已顶到边界，退不动
-  }
-  if (insideY && S.dragscroll_b) {
-    const back = Math.sign(S.dragscroll_b) * Math.min(Math.abs(S.dragscroll_b), 4);
-    const nb = median(0, S.startb - back, Math.max(0, S.endb));
-    if (nb !== S.startb) { S.dragscroll_b -= (S.startb - nb); S.startb = nb; }
-    else S.dragscroll_b = 0;
-  }
+  /* 【不要再自作聪明加"自动滚屏回退"】
+     上一版我在这里加过一套 dragscroll_a/b 的"累计退回"逻辑，
+     想在指针回到网格内侧时把越界滚出去的视图退回来。
+     那是把用户的问题理解错了 —— 用户说的"卡住"不是"拖出去回不来"，
+     而是【指针还在画布内、往边缘拖的时候突然一跳】。
+     那套逻辑还会和用户主动的滚动意向对抗（用户想停在哪就停在哪），
+     所以整个删掉，回到 GML 的原样：越界就滚，不越界就不滚。 */
 
   /* 框选/拖动选区时，锚点反向补偿（像素） */
   if (S.select > 0) {
@@ -13154,46 +13133,48 @@ function handleGridInput() {
            同样会把选区推到不存在的位置。
        夹的范围：列 0..enda、层 0..endb2（endb2 是已分配的层数，
        这样拖到最下面也不会凭空扩张层数）。 */
-    /* 【横向不能夹到 enda —— 这是"拖动时被莫名往左拉几格、拖不回来"的根因】
-       GML control_draw.gml:517-518 完全没有夹紧：
-           selection_x = starta + floor((mouse_x - (x1+2)) / 32) - select_pressa
-           selection_y = startb + floor((mouse_y - (y1+34)) / 32) - select_pressb
-       只在松手那一刻（:527-528）取 `max(0, selection_x)`。
-       原版之所以敢不夹：鼠标出不了游戏窗口，算出来的值最多溢出一点点。
+    /* 【拖动过程中不要夹紧 —— 这是"往画布边缘拖就被卡住"的根因】
+       用户报："我现在选中了音符，然后拖动的时候，明明鼠标没有移出画布，
+       音符总是被卡住，特别是往画布边缘拖的时候总是被卡。"
 
-       我们之前把拖动中的结果夹到 `0..S.enda`。问题在于：
-         · S.enda 是【最后一个音符所在的列】，不是网格右边界。
-           用户框选一块后想往右拖到空白区（很常见的操作：
-           把一小节复制到后面几小节的空位），一旦越过 enda，
-           目标列被夹回 enda —— 选区"啪"地弹回左边几格，
-           看起来就是被莫名其妙往左拉；
-         · 更糟的是它同时被夹在 0..enda 之间，指针再往右也没用，
-           而往左移动时命中测试又依赖 SEL 位置 —— 于是"拖不回去"。
+       实测（1280×850，逐像素拖动）：往左拖到第 0 列之后
+           c=3 → relX=0   （正常）
+           c=2 → relX=0   期望 -1  ★
+           c=1 → relX=0   期望 -2  ★
+           c=0 → relX=0   期望 -3  ★
+       `SEL.x` 被 clamp 在 0 上不动了，鼠标还在往左走，选区却停住 ——
+       手感就是"卡住/被吸住"，而且再往右拖回来时要先把这段"欠账"走完，
+       表现为"往右拖了却不跟手"。
 
-       正确做法（与 GML 的可见行为一致）：
-         · 下限夹到 0（原版松手时才夹，拖动中允许负值，但负值没有意义，
-           且会让命中测试区域消失，实践上夹 0 更稳）；
-         · 上限放到【网格右缘 + 一个总列数】这种"足够远"的范围，
-           而不是 enda。选区的合法性由 selectionExpandLayersSafe() 在
-           松手时负责（它会按需把数组撑大到能容纳新位置）。
-         · 层方向的 endb2 同理放宽到"当前已分配层数"，与横向对称。 */
+       GML control_draw.gml:517-518 在拖动中【完全不夹】：
+           selection_x = starta + floor((mouse_x - (x1 + 2)) / 32) - select_pressa
+       只在松手那一刻（:527）做 `selection_x = max(0, selection_x)`。
+       原版敢这样是因为鼠标出不了游戏窗口；网页端指针能跑到工具栏、
+       图层栏、甚至屏幕外，所以拖动中仍需一个【足够宽】的安全上限，
+       防止把选区甩到几万列之外（selectionExpandLayers 会把数组撑爆）。
+
+       但【下限绝不能在拖动中夹】：
+       它正是"往边缘拖就卡住"的直接原因，而且负值本身是无害的
+       （松手时会夹回 0，与 GML 的 :527 一致）。
+       上限保留 maxA/maxB 作为兜底。 */
     const maxA = Math.max(0, S.enda) + S.totalcols + 64;
-    /* 【纵向上限必须也放宽 —— 这是"上下拖动有时会被卡住"的根因】
+    /* 【纵向上限同样要放宽】
        纵向原来的上限是 `S.endb2 - 1`，即【已分配的最后一层】。
        框选一块往下拖时，只要拖到比现有层数更靠下的位置就被夹住，
-       手指还在往下走、选区却停住 —— 触感就是"被什么东西卡住"。
+       手指还在往下走、选区却停住 —— 与横向是同一个"卡住"。
        而且 selectionExpandLayersSafe() 只在【松手】时调用，
        拖动过程中层数不增长，所以这个上限是硬的、无法靠拖过去突破。
-       横向上一版已经放宽过，纵向漏改了，这里对齐：
-       上限再加 totalrows + 64 层余量，让拖动全程跟手；
+       现在加 totalrows + 64 层余量，让拖动全程跟手；
        真正的层数增长仍由松手时的 selectionExpandLayersSafe() 完成。 */
     const maxB = Math.max(0, S.endb2 - 1) + S.totalrows + 64;
-    const nx = clamp(S.starta + floor((G.mouse.x - gx) / 32) - S.select_pressa, 0, maxA);
-    const ny = clamp(S.startb + floor((G.mouse.y - gy) / 32) - S.select_pressb, 0, maxB);
+    const nx = Math.min(S.starta + floor((G.mouse.x - gx) / 32) - S.select_pressa, maxA);
+    const ny = Math.min(S.startb + floor((G.mouse.y - gy) / 32) - S.select_pressb, maxB);
     SEL.x = floor(nx); SEL.y = floor(ny);
     G.cursor = 'move';
     if (!G.mb[0]) {
-      // 对照 control_draw.gml:526-532：松手时把坐标夹到 >=0，写历史，再 selection_expand_layers()
+      // 对照 control_draw.gml:526-532：松手时才把坐标夹到 >=0，写历史，再 selection_expand_layers()
+      SEL.x = Math.max(0, SEL.x);
+      SEL.y = Math.max(0, SEL.y);
       S.window = W_RELEASE;
       const ox = S.selection_sx0, oy = S.selection_sy0;
       const fx = SEL.x, fy = SEL.y;
@@ -15609,8 +15590,20 @@ function drawTopBar() {
   drawCompatibility();
 
   /* 把这一帧实测到的顶栏高度写回布局用。
-     竖屏下顶栏折行后可能有两三行，网格必须从这里往下让开。 */
-  const measured = (rowMaxY - 23) + 23 + 20;
+     竖屏下顶栏折行后可能有两三行，网格必须从这里往下让开；
+     桌面窄屏下展开音色盒同样会让它变高（见 computeLayout 的说明）。
+
+     【公式要算到"最后一行图标的底部"】
+     原来写 `(rowMaxY - 23) + 23 + 20`，化简就是 rowMaxY + 20。
+     单行时 rowMaxY = 23 → 43，而图标本身从 rowY 画到 rowY + 25 = 48，
+     也就是说算出来的高度【比图标实际底部还小 5px】。
+     以前没人发现，是因为桌面分支把 y1 写死 52（正好盖住这个偏差）；
+     现在 y1 改用 toolbar_h，这个偏差就会让网格压住图标底部 5px。
+     正确：最后一行图标的底 = rowMaxY + 25，再留 4px 间距。
+     单行时 = 23 + 25 + 4 = 52 —— 与原版写死的 y1 = 52 完全吻合，
+     所以宽屏布局保持逐像素不变。 */
+  const measured = rowMaxY + 25 + 4;
+  if (S.toolbar_h !== measured) S.toolbar_h = measured;
   if (S.toolbar_h !== measured) S.toolbar_h = measured;
 }
 
