@@ -656,8 +656,20 @@ function selectionDelete(undo) {
    且鼠标正压在某个 existe 的选区方块上时，才允许「按住拖动整个选区」。 */
 function selectionDragHitTest(xs, ys, w, h) {
   if (S.selected === 0) return null;
+  /* 【拖动进行中也要能命中】
+     GML selection_draw.gml:74-76 专门有一个 else-if 分支：
+         } else if (window = w_dragselection) {
+             if (select_pressa = sa && select_pressb = sb) salpha = 0.7
+         }
+     也就是说拖拽期间原版【仍然在遍历选区、仍然计算命中】，
+     只是把已经抓住的那一格单独标记出来高亮。
+     我们之前在这里 `if (S.window !== 0) return null;` 直接返回，
+     于是拖拽过程中一旦因为任何原因丢了抓取点（比如指针离开网格、
+     或 SEL 位置被夹紧后与指针不再重合），就再也抓不回来 ——
+     用户描述成"想拖回去，结果像是被卡住一样，拖不回原来的位置"。
+     现在：拖拽态放行，返回的 sa/sb 用来判断"是否还压在原来那一格上"。 */
   if (S.select !== 0 || S.cursmarker || S.playing !== 0) return null;
-  if (S.window !== 0) return null;
+  if (S.window !== 0 && S.window !== W_DRAGSELECTION) return null;
   const sta = Math.floor(S.starta), stb = Math.floor(S.startb);
   const noff = S.note_offset || 0;
   if (SEL.x > sta + w || SEL.y > stb + h || SEL.x + SEL.l <= sta || SEL.y + SEL.h <= stb) return null;

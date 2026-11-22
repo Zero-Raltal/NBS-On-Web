@@ -217,7 +217,23 @@ function editorFrame(dt) {
       S.selbx = floor(S.starta) + S.sela;
       S.selby = floor(S.startb) + S.selb;
       S.hover.x = S.selbx; S.hover.y = S.selby;
-      S.hover.exist = (S.selbx < S.arraylength && S.selby < S.arrayheight) ? gExists(S.selbx, S.selby) : 0;
+      /* 【有选区时 exist 必须为 0 —— 对照 control_draw.gml:278】
+             if (select = 0 && selected = 0 && selbx < arraylength && selby < arrayheight) {
+                 exist = song_exists[selbx, selby]
+         原版这一行有三个前提：没在框选、**没有选区**、坐标在界内。
+         我们漏掉了 `selected = 0`，于是「先框选一块，再去右键其中一个音符」时
+         exist 仍然为 1，后续 `if (selected = 0 && exist) remove_block_manual(...)`
+         之外的分支就乱了：
+           · handleGridInput 的右键按下分支里，selected > 0 时本来不该删方块，
+             但因为 exist 误判，RightPress 走到了删除逻辑；
+           · 结果 removed = true → 松手那帧判定「已经删过了」→ **菜单不弹**。
+         这正是用户报的「选中音符块的情况下右键无法弹出菜单」。
+         注意用户说的"选中音符块"是【框选之后】的状态：
+         单个音符只点一下并不会形成选区（要拖动才形成），
+         所以单点右键弹菜单一直是好的，只有框选后才失效。 */
+      S.hover.exist = (S.selected === 0 && S.window === 0 &&
+        S.selbx < S.arraylength && S.selby < S.arrayheight)
+        ? gExists(S.selbx, S.selby) : 0;
       // 按用户要求：画布上不再显示十字（加号）形光标，用普通箭头。
       // GameMaker 桌面版没有这个十字光标，浏览器里它反而显得突兀。
       G.cursor = 'default';
@@ -1093,7 +1109,30 @@ function handleGridInput() {
            同样会把选区推到不存在的位置。
        夹的范围：列 0..enda、层 0..endb2（endb2 是已分配的层数，
        这样拖到最下面也不会凭空扩张层数）。 */
-    const maxA = Math.max(0, S.enda);
+    /* 【横向不能夹到 enda —— 这是"拖动时被莫名往左拉几格、拖不回来"的根因】
+       GML control_draw.gml:517-518 完全没有夹紧：
+           selection_x = starta + floor((mouse_x - (x1+2)) / 32) - select_pressa
+           selection_y = startb + floor((mouse_y - (y1+34)) / 32) - select_pressb
+       只在松手那一刻（:527-528）取 `max(0, selection_x)`。
+       原版之所以敢不夹：鼠标出不了游戏窗口，算出来的值最多溢出一点点。
+
+       我们之前把拖动中的结果夹到 `0..S.enda`。问题在于：
+         · S.enda 是【最后一个音符所在的列】，不是网格右边界。
+           用户框选一块后想往右拖到空白区（很常见的操作：
+           把一小节复制到后面几小节的空位），一旦越过 enda，
+           目标列被夹回 enda —— 选区"啪"地弹回左边几格，
+           看起来就是被莫名其妙往左拉；
+         · 更糟的是它同时被夹在 0..enda 之间，指针再往右也没用，
+           而往左移动时命中测试又依赖 SEL 位置 —— 于是"拖不回去"。
+
+       正确做法（与 GML 的可见行为一致）：
+         · 下限夹到 0（原版松手时才夹，拖动中允许负值，但负值没有意义，
+           且会让命中测试区域消失，实践上夹 0 更稳）；
+         · 上限放到【网格右缘 + 一个总列数】这种"足够远"的范围，
+           而不是 enda。选区的合法性由 selectionExpandLayersSafe() 在
+           松手时负责（它会按需把数组撑大到能容纳新位置）。
+         · 层方向的 endb2 同理放宽到"当前已分配层数"，与横向对称。 */
+    const maxA = Math.max(0, S.enda) + S.totalcols + 64;
     const maxB = Math.max(0, S.endb2 - 1);
     const nx = clamp(S.starta + floor((G.mouse.x - gx) / 32) - S.select_pressa, 0, maxA);
     const ny = clamp(S.startb + floor((G.mouse.y - gy) / 32) - S.select_pressb, 0, maxB);
@@ -1273,11 +1312,38 @@ function handleGridInput() {
   if (G.mbp[2] && G.ctrl) { selectionRemove(S.selbx, S.selby, S.selbx, S.selby, false, false); }
 
   // 右键：按下记录起点；单击（不拖动且没删到方块）→ 弹出菜单；拖动 → 擦除 / 从选区移除
+  /* 【对照 control_draw.gml:596-608】
+       if (mouse_check_button(mb_right) && !keyboard_check(vk_control)) {
+           if ((starta+sela != select_pressa || startb+selb != select_pressb) && select_pressx != -1) {
+               select = 2
+           } else if (exist = 1) {
+               remove_block_manual(selbx, selby)
+               select_pressx = -1
+           }
+       }
+       if (mouse_check_button_released(mb_right)) {
+           if (starta+sela = select_pressa && startb+selb = select_pressb && select_pressx != -1 && !ctrl) {
+               ... 组装并 show_menu_ext("editext", ...) ...
+           }
+       }
+     关键点：
+       1. 原版删方块的前提是 `exist = 1`，而 exist 在 selected > 0 时恒为 0
+          （:278），所以**有选区时右键绝不会删掉方块**。
+       2. 删过方块之后原版会把 select_pressx 置 -1，
+          于是下一个 `select_pressx != -1` 的判定为假 → 不弹菜单。
+          单点右键删音符不弹菜单是【原版设计】，不是 bug。
+       3. 有选区时 select_pressx 保持有效（因为没删），松手就弹菜单。
+     我们之前的实现：
+       - 用 `S.selected === 0 && exist` 判断删除（这一条是对的），
+       - 但 exist 在 selected > 0 时也被误判为 1（已在上方修掉），
+       - 并且 removed 标记没有同时清 select_pressx，导致状态不一致。 */
   if (G.mbp[2] && !G.ctrl) {
     S.rightPress = { x: S.selbx, y: S.selby, removed: false, moved: false };
     if (S.selected === 0 && exist) {
       removeBlockManual(S.selbx, S.selby);
       S.rightPress.removed = true;
+      /* 对照 :601 —— 删过就把按下点作废，松手时不再弹菜单 */
+      S.select_pressx = -1; S.select_pressy = -1;
     }
   }
   if (G.mb[2] && !G.ctrl && S.rightPress) {
@@ -1754,15 +1820,23 @@ function drawEditor(dt) {  const c = G.ctx;
     fillRect(gx + totalcols * 32 + 2, S.y1 + totalrows * 32 + 32, 17, 18);
   }
 
-  /* 【补画一次播放标记 —— 修"倒三角被层操作栏遮挡"】
-     见 drawMarkerAt 的说明：上面那几块墙 / 面板底色是【在 drawTimeline 之后】
-     铺的，会把 marker_pos = 0 时倒三角的左半边盖掉。
-     这里在所有底色铺完之后、滚动条之前，把标记重新画一遍到最上层。
-     （GML 里没有这一步，属于有意偏离，为的是标记始终完整可见。） */
-  if (!S.fullscreen) {
-    const mxx2 = gx + floor(S.marker_pos * 32 - S.starta * 32);
-    drawMarkerAt(mxx2, y1);
-  }
+  /* 【这里不再"补画一次播放标记" —— 恢复 GML 的原始叠放顺序】
+     曾经为了修"marker_pos=0 时倒三角左半边被层操作栏盖掉"，在这里
+     把所有面板底色铺完之后又把 marker 画一遍到最上层。那确实让三角完整了，
+     但也带来一个更严重的问题（用户报）：
+         "播放刻度线停在 0 刻度线的时候，如果把画布的横向滑块往右边拉一点，
+          刻度线就覆盖在了层操作区的上方，按理来说应该在下方的"。
+     根因：spr_marker 的帧是 16 宽、原点 xo = 8，所以锚点左侧 8px 必然外溢。
+     而网格左边界 gx = x1 + 2，锚点落在 gx 时左缘 = x1 - 6 ——
+     正好 6px 压在层操作区上。原版把 marker 画在 control_draw:1220、
+     层操作栏在 :1312，层栏【后画】所以会盖住这 6px；
+     我们把它补画到最上层，等于让这 6px 反过来盖住层栏。
+     用户明确要求"应该在下方的"，所以这里去掉补画，回到 GML 的顺序：
+     marker 归 drawTimeline 画一次，层操作栏随后覆盖其上。
+     （网格内部那部分不受影响 —— 上面几处面板底色 fillRect 都只覆盖
+      层栏区 / 网格下方 / 网格右侧，没有一块会盖住网格内部。）
+     另：markerScreenX() 的夹紧仍然保留，否则 starta 远大于 marker_pos 时
+     整条线会跑到层区深处，那才是真正的错误位置。 */
 
   // 滚动条
   /* 对照 control_draw.gml:1245-1262：
@@ -2101,11 +2175,43 @@ function drawTimeline() {
   // 刻度线就固定在屏幕中间不动，只有底下的网格靠 note_offset 做亚格平滑地滚动。
   // 之前在这里多减了一个 noff，等于把网格的滚动量又叠加到刻度线上，
   // 每帧来回抖 —— 用户看到的就是「按帧时进度条和时间轴一直抽搐」。
-  const mxx = gx + floor(S.marker_pos * 32 - S.starta * 32);
+  const mxx = markerScreenX();
   // 同上：先竖线、后倒三角，避免线切在三角上
   drawMarkerAt(mxx, y1);
   setAlpha(1);
   setFont(FONT.main());
+}
+
+/* 播放标记在屏幕上的 x 坐标。
+   【必须夹在网格范围内，否则 starta > marker_pos 时会画到层操作区上面】
+   用户报："播放刻度线停在 0 刻度线的时候，如果把画布的横向滑块往右边拉一点，
+   刻度线就覆盖在了层操作区的上方，按理来说应该在下方的"。
+
+   GML control_draw.gml:1219-1220 的算法是
+       a = floor(marker_pos * 32 - starta * 32)
+       draw_sprite_ext(spr_marker, ..., x1 + 2 + a, y1 + 2, ...)
+   marker_pos = 0、starta = 3 时 a = -96，落点 x1+2-96 = 170，
+   而层操作区占 0..x1（264）。原版不会露到层区上，是因为：
+     · 原版 marker 是在网格绘制流程里画的，与网格共用裁剪区；
+     · 更关键的是原版 marker_pos 与 starta 不会长期保持这种关系 ——
+       starta 由滚动条驱动时 marker_pos 也在 0..enda 内，
+       而 scrollbar 的 starta 上限是 enda（marker_pos=0 时 starta 通常就是 0）。
+   我们的横向滚动条允许 starta 独立推进到 enda（用户可以把视图往后翻，
+   而播放位置停在 0），于是这个组合在网页端很常见。
+
+   处理：把落点夹在 [gx, gx + totalcols*32 - 8]。
+     左界取 gx（= marker_pos=0、starta=0 时的自然落点）：
+     这正是原版在最左端的位置，倒三角那 8px 左溢由"补画到最上层"负责
+     （那是之前单独修过的问题，不能因为这次夹紧又退回去）。
+     再往左就让 starta 自由滚动没有意义了 —— 播放位置已经在第一格，
+     刻度线不该横向滑进层操作区。
+     右界留 8px，避免竖线露到右侧滚动条区。 */
+function markerScreenX() {
+  const gx = S.gx;
+  const raw = gx + floor(S.marker_pos * 32 - S.starta * 32);
+  const lo = gx;
+  const hi = gx + S.totalcols * 32 - 8;
+  return raw < lo ? lo : (raw > hi ? hi : raw);
 }
 
 /* 播放标记（竖线 + 顶部倒三角）的独立绘制。
@@ -3733,22 +3839,21 @@ function drawPianoAll() {
 }
 
 /* 钢琴两端渐隐的 alpha 夹紧。
-   对照 draw_piano.gml:119-120：
+   对照 draw_piano.gml:121 起 `alpha = max(0, 3 - startkey)`，
+   循环体末尾（白键黑键共用一处）按
      if (a < 3 && alpha < 3) alpha += 1
      if (a > k - min(5, 54 - (startkey + k))) alpha -= 1
-   alpha 从 max(0, 3 - startkey) 起步，两端各增减 1，正常范围 0..3，
-   而 draw_piano_key.gml:20/23 的遮罩是 `0.8 - alpha / 3`。
+   变化；draw_piano_key.gml:20/70 的遮罩是 `if (alpha < 3)` 时叠
+   `0.8 - alpha/3` 的窗口底色。
 
-   【问题】右端递减没有下限：
-     k=20、startkey=17 时阈值 = 20 - min(5, 54-37) = 20-5 = 15，
-     a=16..19 连减 4 次，alpha 从 3 一路减到 -1。
-     遮罩随之变成 0.8-(-1)/3 = 1.13 → GameMaker 会 clamp 到 1 → 琴键被【完全盖死】。
-     用户看到的就是右侧一整块灰色/空白的假琴键
-     （截图里那个突兀的灰色圆角块就是这个被遮死的键）。
-   GML 没有显式夹紧，但它靠 clamp 的副作用"碰巧"看起来还行；
-   在键数少的横屏窗口里（比如 840px 宽 → 20 键）问题就被放大到无法忽略。
-   这里把 alpha 夹到 [0, 3]：alpha=0 时遮罩是 0.8（淡出但仍看得见琴键轮廓），
-   不会再出现"整块盖死"。这是有意的偏离，理由就是"渐隐不该变成遮挡"。 */
+   【之前这里对"减到负值"的推断是错的，已更正】
+   旧注释说 k=20、startkey=17 时会减到 -1 并把琴键盖死。实际算一遍：
+     阈值 = 20 - min(5, 54 - (17+20)) = 20 - min(5,17) = 15
+     a 从 0 起每轮先 +1（a<3 时），所以进入 a=16..19 时 alpha 早已是 3，
+     减 4 次 → 最低 0，不会为负。
+     起点 `max(0, 3-startkey)` 在 startkey >= 3 时恒为 3，
+     而阈值保证最多减 5 次 —— 正好到 0。这就是 GML 的写法之所以安全。
+   夹到 [0,3] 保持原样（比 GML 更保守，且不会改变正常情况下的结果）。 */
 function clampAlpha(a) {
   return a < 0 ? 0 : (a > 3 ? 3 : a);
 }
@@ -3832,9 +3937,13 @@ function drawPiano(xx, yy, k, totalcols) {
       if (c1 < pianoKeyLo) pianoKeyLo = c1;
       if (c2 > pianoKeyHi) pianoKeyHi = c2;
       b += 2;
-      if (a < 3 && keyAlpha < 3) keyAlpha += 1;
-      if (!S.drawer_piano_flat && a > k - Math.min(5, 54 - (S.startkey + k))) keyAlpha -= 1;
-      if (keyAlpha < 0) keyAlpha = 0;
+      /* 【黑键分支里不要再动 keyAlpha】
+         GML 的 draw_piano.gml:119-120 只有【一处】增减，在 `b += 1` 之后、
+         循环体末尾（白键和黑键共用的位置）。
+         我们之前在 if/else 两个分支里各写了一遍，于是黑键那一轮
+         keyAlpha 被改了两次 —— 两端渐隐的速度是白键的两倍，
+         左端还没到 3 就提前"满"，右端提前掉到 0。
+         这就是用户看到的「左右两边渐变处理不正确」。 */
     } else {
       const c1 = S.startkey + S.sharpkeys + b;
       const k1 = S.show_keyboard && S.piano_key[c1] > 0;
@@ -3915,15 +4024,16 @@ function drawPianoKey(isblack, xx, yy, color, alpha, key, showkeybind, showclick
   if (alpha === undefined) alpha = 3;
   // 两端渐隐遮罩：alpha < 3 时叠一层窗口底色
   const mask = (frameNo, yy2) => {
-    /* 【alpha = 0 时不画遮罩】
-       对照 draw_piano_key.gml:20/23：`if (alpha < 3) draw_sprite(..., 0.8 - alpha/3)`。
-       alpha 走到 0 时遮罩是 0.8 —— 仍然盖掉 80%，
-       在键数少的横屏窗口里（840px → 20 键，右端 4 个键都会走到 0）
-       看起来就是"右边一整块空白琴键"（用户截图里那两块）。
-       渐隐的本意是"这个音域之外、淡一点"，不是"擦掉"。
-       所以 alpha = 0 时干脆不画遮罩：键仍然完整可见，只是两端不再额外压暗。
-       这是有意偏离 GML 的一处，理由：遮罩不该把琴键抹成空白。 */
-    if (alpha > 0 && alpha < 3) drawSprite('spr_piano', frameNo, xx, yy2, 1, 1, C.background, clamp(0.8 - alpha / 3, 0, 1));
+    /* 对照 draw_piano_key.gml:20/23/70/73：
+         if (alpha < 3) draw_sprite_ext(..., window_background, 0.8 - alpha / 3)
+       条件只有 `alpha < 3`，【没有 alpha > 0】。
+       我们之前写成 `alpha > 0 && alpha < 3`，等于在 alpha 恰好为 0 时
+       干脆不画遮罩 —— 而 alpha = 0 正是"最该压暗"的那一档
+       （0.8 透明度窗口底色），跳过它会让最外侧那个键比内侧的还亮，
+       两端渐变看起来就是断的、里外颠倒。
+       现在严格按 GML：只要 alpha < 3 就画，alpha = 0 时遮罩 0.8。 */
+    if (alpha < 3) drawSprite('spr_piano', frameNo, xx, yy2, 1, 1, C.background,
+      clamp(0.8 - alpha / 3, 0, 1));
   };
   if (isblack) {
     // Key：先画底部小条，再画上半身（与源码顺序一致）
