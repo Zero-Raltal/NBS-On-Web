@@ -8639,6 +8639,22 @@ function schematicWriteNbt(m) {
      song.schematic 下载（实测确实多发了一个 4KB 的文件）。
      用 S.schExpSilent 显式声明"本次只要布局、不要落地"，
      其它所有既有调用方都不设这个标志，行为完全不变。 */
+  /* 【文件名】原先这里写的是 `base`，但这个标识符在 schematicWriteNbt 里
+     从未定义（既不是参数、也没有局部声明），严格模式下会抛
+     `ReferenceError: base is not defined` —— 也就是说"导出为 schematic"
+     这条路一直是走不通的，只是在测试里都被静默模式绕过了。
+
+     扩展名按 GML schematic_export.gml:5-6 分两种：
+       structure（1.13+ 结构方块） → 小写+空格换下划线 + ".nbt"
+       其它（legacy .schematic）  → 原样 + ".schematic" */
+  let base;
+  if (structure) {
+    base = String(S.filename || S.song_name || 'song')
+      .toLowerCase().replace(/ /g, '_').replace(/\.[^.]*$/, '') + '.nbt';
+  } else {
+    base = String(S.filename || S.song_name || 'song')
+      .replace(/\.[^.]+$/, '') + '.schematic';
+  }
   if (!S.schExpSilent) downloadBytes(gz, base);
   return gz;
 }
